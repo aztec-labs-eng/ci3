@@ -102,9 +102,11 @@ by hand (`cache_ls`, `cache_delete`, `clean_remote_tags`, `start_interactive`). 
 established by auditing every reference in the consuming repositories. Changing the name, arguments, output format
 or exit codes of anything public is a breaking change for them.
 
-Entry points are sourced by path — `source $(git rev-parse --show-toplevel)/ci3/source` (or
-`source_bootstrap` from a `bootstrap.sh`) — which puts ci3 on `PATH`, so the rest is called by
-name: `denoise`, `cache_download`, `parallelize`, and so on.
+Entry points are sourced by path — `source $(git rev-parse --show-toplevel)/ci3/source`,
+`source_bootstrap` from a `bootstrap.sh`, or the minimal `source_base` — which puts ci3 on `PATH`,
+so the rest is called by name: `denoise`, `cache_download`, `parallelize`, and so on. `source`
+already brings in redis, the ref name and the cache settings; those fragments are internal and
+never need sourcing separately. Only `source_npm_auth` and `source_release_target` are opt-in.
 
 ### Internal
 

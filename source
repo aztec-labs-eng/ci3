@@ -5,6 +5,6 @@ source "$(dirname "${BASH_SOURCE[0]}")/source_base"
 source $ci3/internal/source_options
 source $ci3/internal/source_color
 source $ci3/internal/source_stdlib
-source $ci3/source_redis
-source $ci3/source_refname
-source $ci3/source_cache
+source $ci3/internal/source_redis
+source $ci3/internal/source_refname
+source $ci3/internal/source_cache
