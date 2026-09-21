@@ -97,8 +97,9 @@ deliberately narrower than "every file here".
 ### Public
 
 Everything at the top level of this repository, plus `aws/`, `bin/`, `dashboard/` and `lua/`. A
-script is public because a consuming repository sources or executes it; the set was established by
-auditing every reference in the consuming repositories. Changing the name, arguments, output format
+script is public because a consuming repository sources or executes it, or because a person runs it
+by hand (`cache_ls`, `cache_delete`, `clean_remote_tags`, `start_interactive`). The scripted set was
+established by auditing every reference in the consuming repositories. Changing the name, arguments, output format
 or exit codes of anything public is a breaking change for them.
 
 Entry points are sourced by path — `source $(git rev-parse --show-toplevel)/ci3/source` (or
