@@ -88,3 +88,42 @@ Tools are provided for the following themes.
 4. **On success**:
    - Artifacts can be re-uploaded or flagged as “passed,” letting future runs skip unchanged steps.
 
+
+## Interface
+
+ci3 is consumed as a git submodule at `<repo>/ci3`. What a consuming repository may rely on is
+deliberately narrower than "every file here".
+
+### Public
+
+Everything at the top level of this repository, plus `aws/`, `bin/`, `dashboard/` and `lua/`. A
+script is public because a consuming repository sources or executes it; the set was established by
+auditing every reference in the consuming repositories. Changing the name, arguments, output format
+or exit codes of anything public is a breaking change for them.
+
+Entry points are sourced by path — `source $(git rev-parse --show-toplevel)/ci3/source` (or
+`source_bootstrap` from a `bootstrap.sh`) — which puts ci3 on `PATH`, so the rest is called by
+name: `denoise`, `cache_download`, `parallelize`, and so on.
+
+### Internal
+
+`internal/` holds scripts only ci3 itself uses. It is on `PATH` so ci3's scripts can call each other
+by name, but nothing outside ci3 should: these can change or disappear without notice. A script
+moves out of `internal/` when a consuming repository needs it, not before.
+
+### What ci3 expects from the consuming repository
+
+The dependency runs both ways. ci3 reads these from the repository it is building:
+
+- `.test_patterns.yml` — test ownership and skip/flake patterns (`filter_test_cmds`, `run_test_cmd`).
+- `scripts/process_flake_log.py` — optional; run by `parallelize` after a test run when present.
+- `.release-please-manifest.json` — optional; the source of `CURRENT_VERSION`.
+- `build-images/src/home/.gitconfig` — mounted into containers by `docker_isolate`.
+
+### State shared between versions
+
+A repository pins its own ci3, and a build can involve more than one pin: a repository and a
+submodule of it each use their own. What has to stay compatible across versions is therefore not
+the scripts but the state they share: redis key shapes (`ci-run-<org>/<repo>/<section>`,
+`history_*`, `hb-*`, the test cache), build-cache artifact names, the `<hash>[:VAR=val] <cmd>`
+test command format, and the dashboard's server API.

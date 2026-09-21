@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 # Self-contained test for ci3/upload_benchmarks against a local fixture data repo. Run directly.
-SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/upload_benchmarks"
+SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/upload_benchmarks"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 cd "$WORK"
