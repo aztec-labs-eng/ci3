@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-source $(dirname "${BASH_SOURCE[0]}")/source
+source $(dirname "${BASH_SOURCE[0]}")/../source
 
 name=$1
 ami=$2
