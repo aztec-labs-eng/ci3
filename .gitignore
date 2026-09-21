@@ -1,1 +1,4 @@
 semc
+# Written by parallelize when the suite is run from a standalone checkout.
+joblog.txt
+.logged_test_flakes
