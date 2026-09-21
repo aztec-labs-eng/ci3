@@ -38,6 +38,12 @@
 # - AZTEC_CACHE_COMMIT: Compute the content hash for artifacts from an earlier commit.
 NO_CD=1 source $(dirname "${BASH_SOURCE[0]}")/source
 
+# Patterns are rooted at the git repository we are in, which may be one nested in the
+# repository being built (hence not $root). The exception is ci3 itself: as a submodule
+# its files are one gitlink in the repository being built, so hash it from there.
+repo_path=${REPO_PATH:-$(git rev-parse --show-toplevel)}
+[ "$repo_path" == "$ci3" ] && repo_path=$root
+
 if [[ "$#" = 0 ]]; then
   echo "Error: No arguments provided."
   exit 1
@@ -63,7 +69,7 @@ function add_pattern {
       echo_stderr "Error: Directory '$p' does not exist."
       exit 1
     fi
-    p=$(realpath --relative-to="$root" "$p")
+    p=$(realpath --relative-to="$repo_path" "$p")
   fi
   [[ "$sign" == "+" ]] && have_positive=1
   patterns+=("$sign$p")
@@ -116,8 +122,7 @@ function filter_paths {
   awk -F'\t' -v mode="$1" "$awk_prog"
 }
 
-# use git repo root because that is where our patterns are focused
-cd "${REPO_PATH:-$root}"
+cd "$repo_path"
 
 diff="$({
   git diff --name-only
