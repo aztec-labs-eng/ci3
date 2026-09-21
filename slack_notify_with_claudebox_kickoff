@@ -15,7 +15,7 @@ set -eu
 #           whose claudebox.yml is dispatched (holds the CLAUDEBOX_API_SECRET).
 
 NO_CD=1 source "$(dirname "${BASH_SOURCE[0]}")/source_base"
-source "$ci3/source_stdlib"
+source "$ci3/internal/source_stdlib"
 
 if [[ "${CI:-}" != "1" ]]; then
   echo "Not in CI — skipping slack_notify_with_claudebox_kickoff"

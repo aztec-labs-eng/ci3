@@ -21,9 +21,10 @@ export root
 # Enter our script directory, allowing usage of scripts from any directory.
 [ -z "${NO_CD:-}" ] && cd "$(dirname $0)"
 
-# Update PATH with ci3 tools.
+# Update PATH with ci3 tools. internal/ is on it so ci3's own scripts can call each other
+# by name; it is not part of the interface, so nothing outside ci3 should.
 if [[ "$PATH" != *"$ci3:" ]]; then
-  export PATH=$ci3:$PATH
+  export PATH=$ci3:$ci3/internal:$PATH
 
   # We're on the github runner, we're about to launch ec2 instances with our container, but we need:
   #  - redis-cli for logging.
