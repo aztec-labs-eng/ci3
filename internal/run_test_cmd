@@ -4,7 +4,7 @@
 # - Cache checking
 # - Redis publishing (started/failed/flaked events)
 # - Flake detection and owner notification
-NO_CD=1 source $(dirname "${BASH_SOURCE[0]}")/source
+NO_CD=1 source $(dirname "${BASH_SOURCE[0]}")/../source
 
 # We must enable job control to ensure our test runs in it's own process group.
 # Otherwise, when parallel sends a TERM to the group, it will also kill any child process of the test.
@@ -193,7 +193,7 @@ function run_test {
   set +e
   # Pass this attempt's log id so exec_test can name the test's timing file after it
   # (matching the test's log at ci.aztec-labs.com/<log_key>). Tracks rotate_log on retries.
-  LOG_ID=$log_key $ci3/exec_test "$cmd" >> "$tmp_file" 2>&1 &
+  LOG_ID=$log_key $ci3/internal/exec_test "$cmd" >> "$tmp_file" 2>&1 &
   test_pid=$!
   wait $test_pid
   code=$?

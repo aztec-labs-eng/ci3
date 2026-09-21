@@ -1,5 +1,5 @@
 # Source this to parse a full_cmd and extract test parameters.
-# Usage: full_cmd="<hash>[:VAR=val]... <test_command>" source $ci3/source_test_params
+# Usage: full_cmd="<hash>[:VAR=val]... <test_command>" source $ci3/internal/source_test_params
 #
 # Requires:
 #   full_cmd - The full test command string

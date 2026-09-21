@@ -6,7 +6,7 @@
 # Both modes use instance profiles for AWS credentials.
 
 NO_CD=1 source $(dirname "${BASH_SOURCE[0]}")/source
-source $ci3/source_refname
+source $ci3/internal/source_refname
 
 cmd=${1:?usage: $(basename "$0") '<command-to-run-inside-devbox>'}
 # The repository being built, and the checkout directory named after it. ci3 is shared by

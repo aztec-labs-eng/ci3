@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-NO_CD=1 source $(dirname "${BASH_SOURCE[0]}")/source
+NO_CD=1 source $(dirname "${BASH_SOURCE[0]}")/../source
 
 key=${1:?usage: log_ci_run <key> [status]}
 status=${2:-RUNNING}

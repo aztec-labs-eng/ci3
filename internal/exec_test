@@ -13,14 +13,14 @@
 #
 # Returns: exit code from test
 
-NO_CD=1 source $(dirname "${BASH_SOURCE[0]}")/source
+NO_CD=1 source $(dirname "${BASH_SOURCE[0]}")/../source
 
 full_cmd="$1"
 
 [ -z "$full_cmd" ] && exit 0
 
 # Extract test parameters (hash_prefix, test_cmd, CPUS, TIMEOUT, MEM, etc.)
-source $ci3/source_test_params
+source $ci3/internal/source_test_params
 
 # Compute test hash for history tracking
 test_hash=$(hash_str_orig "$test_cmd")

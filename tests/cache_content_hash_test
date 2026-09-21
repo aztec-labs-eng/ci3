@@ -2,10 +2,10 @@
 set -euo pipefail
 # Self-contained test + benchmark for ci3/cache_content_hash against a fixture repo.
 # Run directly for the correctness suite; run with 'bench' for timings:
-#   ci3/cache_content_hash_test          # correctness
-#   ci3/cache_content_hash_test bench    # benchmark on a synthetic 50k-file tree
+#   ci3/tests/cache_content_hash_test          # correctness
+#   ci3/tests/cache_content_hash_test bench    # benchmark on a synthetic 50k-file tree
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SCRIPT="$REPO/ci3/cache_content_hash"
+SCRIPT="$REPO/cache_content_hash"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
