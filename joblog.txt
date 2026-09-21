@@ -1,9 +1,0 @@
-Seq	Host	Starttime	JobRuntime	Send	Receive	Exitval	Signal	Command
-8	:	1790018440.006	     0.217	0	49	0	0	run_test_cmd 'disabled-cache ./semver test'
-6	:	1790018439.971	     0.348	0	55	0	0	run_test_cmd 'disabled-cache ./tests/signal_test'
-5	:	1790018439.951	     0.691	0	55	0	0	run_test_cmd 'disabled-cache ./tests/redact_test'
-1	:	1790018439.885	     1.482	0	67	0	0	run_test_cmd 'disabled-cache ./tests/cache_content_hash_test'
-3	:	1790018439.919	     1.986	0	61	0	0	run_test_cmd 'disabled-cache ./tests/color_prefix_test'
-4	:	1790018439.935	     2.785	0	56	0	0	run_test_cmd 'disabled-cache ./tests/denoise_test'
-2	:	1790018439.903	     8.791	0	60	0	0	run_test_cmd 'disabled-cache ./tests/cache_local_test'
-7	:	1790018439.989	    11.713	0	67	0	0	run_test_cmd 'disabled-cache ./tests/upload_benchmarks_test'
