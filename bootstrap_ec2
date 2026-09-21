@@ -9,6 +9,11 @@ NO_CD=1 source $(git rev-parse --show-toplevel)/ci3/source
 source $ci3/source_refname
 
 cmd=${1:?usage: $(basename "$0") '<command-to-run-inside-devbox>'}
+# The repository being built, and the checkout directory named after it. ci3 is shared by
+# several repos, so nothing here may assume a particular one.
+github_repository=$(github_repo)
+[ -n "$github_repository" ] || { echo_stderr "Cannot determine GITHUB_REPOSITORY (<org>/<repo>)."; exit 1; }
+repo_dir=${github_repository##*/}
 arch=${ARCH:-amd64}
 NO_TERMINATE=${NO_TERMINATE:-0}
 use_ssh=${CI_USE_SSH:-0}
@@ -177,8 +182,8 @@ container_script=$(
   # Note we use the "ci-started" file to determine if we're running on a CI machine in some cases (e.g. npm cache).
   while [ -f ci-started ]; do sleep 999; done
   touch ci-started
-  sudo chown aztec-dev:aztec-dev aztec-node
-  cd aztec-node
+  sudo chown aztec-dev:aztec-dev $repo_dir
+  cd $repo_dir
   git config --global advice.detachedHead false
   git init .
   if [ -n "\${GITHUB_TOKEN:-}" ]; then
@@ -189,6 +194,9 @@ container_script=$(
   git fetch --depth 1 origin $current_commit
   git checkout FETCH_HEAD
   git checkout -b \$REF_NAME
+  # ci3 is a submodule and the shallow fetch above does not bring it: init it before
+  # anything sources it.
+  git submodule update --init --depth 1 ci3
   source ci3/source
   ci_log_id=\$CI_LOG_ID
   log_ci_run \$ci_log_id
@@ -349,7 +357,7 @@ start_build() {
     --name aztec_build \
     --hostname $docker_hostname \
     -v bootstrap_ci_local_docker:/var/lib/docker \
-    -v bootstrap_ci_repo:/home/aztec-dev/aztec-node \
+    -v bootstrap_ci_repo:/home/aztec-dev/$repo_dir \
     -v \$HOME/.ssh:/home/aztec-dev/.ssh:ro \
     -v \$HOME/.bb-crs:/home/aztec-dev/.bb-crs \
     -v /dev/kmsg:/dev/kmsg \
@@ -382,7 +390,7 @@ start_build() {
     -e R2_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY:-} \
     -e BUILD_SYSTEM_DEBUG=${BUILD_SYSTEM_DEBUG:-} \
     -e GITHUB_TOKEN=${GITHUB_TOKEN:-} \
-    -e GITHUB_REPOSITORY=${GITHUB_REPOSITORY:-aztec-labs-eng/aztec-node} \
+    -e GITHUB_REPOSITORY=$github_repository \
     -e PR_NUMBER=${PR_NUMBER:-} \
     -e PR_HEAD_REF=${PR_HEAD_REF:-} \
     -e PR_BASE_REF=${PR_BASE_REF:-} \

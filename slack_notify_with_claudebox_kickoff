@@ -11,10 +11,11 @@ set -eu
 #         it, work aimed at a private repo dead-ends in a public-mode session.
 #
 # Requires: SLACK_BOT_TOKEN
-# Optional: CLAUDEBOX_REPO (default: aztec-labs-eng/aztec-node) -- the repo
+# Optional: CLAUDEBOX_REPO (default: this repository) -- the repo
 #           whose claudebox.yml is dispatched (holds the CLAUDEBOX_API_SECRET).
 
 NO_CD=1 source "$(git rev-parse --show-toplevel)/ci3/source_base"
+source "$ci3/source_stdlib"
 
 if [[ "${CI:-}" != "1" ]]; then
   echo "Not in CI — skipping slack_notify_with_claudebox_kickoff"
@@ -40,7 +41,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-REPO="${CLAUDEBOX_REPO:-aztec-labs-eng/aztec-node}"
+REPO="${CLAUDEBOX_REPO:-$(github_repo)}"
 
 # Post to Slack (inline rather than via ci3/slack_notify because we need the response for permalink)
 if [[ -n "${SLACK_BOT_TOKEN:-}" ]]; then
