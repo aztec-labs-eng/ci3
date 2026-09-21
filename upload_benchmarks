@@ -29,7 +29,7 @@ commit_sha=$4
 bench_repo=${BENCH_REPO:-AztecProtocol/benchmark-page-data}
 repo_url=${BENCH_REPO_URL:-https://x-access-token:${GITHUB_TOKEN:-}@github.com/$bench_repo}
 # Resolved here, while the working directory is still the repository being benchmarked.
-source "$(dirname "${BASH_SOURCE[0]}")/source_stdlib"
+source "$(dirname "${BASH_SOURCE[0]}")/internal/source_stdlib"
 source_repo_url=${SOURCE_REPO_URL:-$(github_repo_url)}
 max_items=${MAX_ITEMS:-100}
 retry_sleep=${RETRY_SLEEP:-5}

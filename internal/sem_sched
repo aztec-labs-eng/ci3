@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-source $(dirname "${BASH_SOURCE[0]}")/source
+source $(dirname "${BASH_SOURCE[0]}")/../source
 
 # Configuration
 SHM_FILE="/dev/shm/cpu_alloc.shm"
@@ -11,7 +11,7 @@ NUMA_FILE="/dev/shm/cpu_numa.shm"
 function init {
   # Build semc if not already built.
   if [ ! -f "$ci3/$SEM_BIN" ]; then
-    gcc -O3 -o "$ci3/$SEM_BIN" "$ci3/semc.c"
+    gcc -O3 -o "$ci3/$SEM_BIN" "$ci3/internal/semc.c"
   fi
 
   # Initialize shared memory and free semaphore if not already created.

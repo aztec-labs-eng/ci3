@@ -2,7 +2,7 @@
 # Test script for local cache functionality in cache_download and cache_upload.
 set -euo pipefail
 
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 test_root="/tmp/cache-local-test-$$"
 passed=0
 failed=0

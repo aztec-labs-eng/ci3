@@ -20,7 +20,7 @@ jobs=$(($(nproc) * jobs_pct / 100))
 trap 'git checkout $commit_tip' EXIT
 
 # Extract test parameters (hash_prefix, test_cmd, CPUS, TIMEOUT, MAKEFILE_TARGET, etc.)
-source $ci3/source_test_params
+source $ci3/internal/source_test_params
 
 function checkout {
     git reset --hard $1 --quiet
