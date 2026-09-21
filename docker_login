@@ -5,7 +5,7 @@
 # us-west1-docker.pkg.dev/<project>/<repo>), so the login host is a prefix strip and nothing has to
 # ask which registry this is. Artifact Registry accepts a service-account key through plain
 # `docker login`, so the release path needs no gcloud.
-NO_CD=1 source $(git rev-parse --show-toplevel)/ci3/source
+NO_CD=1 source $(dirname "${BASH_SOURCE[0]}")/source
 
 set +x # Never echo the password.
 : "${DOCKER_REGISTRY:?DOCKER_REGISTRY is required}"

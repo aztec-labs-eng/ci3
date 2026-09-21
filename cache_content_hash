@@ -36,7 +36,7 @@
 # These are used when iterating on build infrastructure:
 # - AZTEC_CACHE_NO_SCRIPTS: Don't include any shell files (namely bootstrap.sh) in cache patterns.
 # - AZTEC_CACHE_COMMIT: Compute the content hash for artifacts from an earlier commit.
-NO_CD=1 source ${root:-$(git rev-parse --show-toplevel)}/ci3/source
+NO_CD=1 source $(dirname "${BASH_SOURCE[0]}")/source
 
 if [[ "$#" = 0 ]]; then
   echo "Error: No arguments provided."
@@ -63,7 +63,7 @@ function add_pattern {
       echo_stderr "Error: Directory '$p' does not exist."
       exit 1
     fi
-    p=$(realpath --relative-to="$(git rev-parse --show-toplevel)" "$p")
+    p=$(realpath --relative-to="$root" "$p")
   fi
   [[ "$sign" == "+" ]] && have_positive=1
   patterns+=("$sign$p")
@@ -117,7 +117,7 @@ function filter_paths {
 }
 
 # use git repo root because that is where our patterns are focused
-cd "${REPO_PATH:-$(git rev-parse --show-toplevel)}"
+cd "${REPO_PATH:-$root}"
 
 diff="$({
   git diff --name-only

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # For running test cmds that are pathed relative to the repo root.
 # Commands are read from stdin.
-NO_CD=1 source $(git rev-parse --show-toplevel)/ci3/source
+NO_CD=1 source $(dirname "${BASH_SOURCE[0]}")/source
 
 [ "${STRICT_SCHEDULING:-0}" -eq 1 ] && exec parallelize_strict "$@"
 
@@ -54,9 +54,12 @@ fi
 # We filter out the no-ops we use for parallel result liveness.
 echo "Completed run of $(tail -n+2 joblog.txt | grep -v "''" | wc -l) tests in $SECONDS seconds."
 
-# Process flake log (check thresholds and post PR comment in CI)
-if [ "$CI" -eq 1 ]; then
-  $root/scripts/process_flake_log.py "$FLAKES_FILE" --post-comment
-else
-  $root/scripts/process_flake_log.py "$FLAKES_FILE"
+# Process flake log (check thresholds and post PR comment in CI). The processor belongs
+# to the repository being built; one that does not provide it skips the step.
+if [ -x "$root/scripts/process_flake_log.py" ]; then
+  if [ "$CI" -eq 1 ]; then
+    $root/scripts/process_flake_log.py "$FLAKES_FILE" --post-comment
+  else
+    $root/scripts/process_flake_log.py "$FLAKES_FILE"
+  fi
 fi

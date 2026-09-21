@@ -1,13 +1,22 @@
 #!/usr/bin/env bash
-source $(git rev-parse --show-toplevel)/ci3/source_bootstrap
+source $(dirname "${BASH_SOURCE[0]}")/source_bootstrap
 
-hash=$(cache_content_hash ^ci3)
+# ci3 relative to the repository being built: "ci3" as a submodule, "." standalone. Test
+# commands run from the root, and the hash covers ci3 alone either way.
+ci3_rel=$(realpath --relative-to="$root" "$ci3")
+if [ "$ci3_rel" == "." ]; then
+  hash=$(cache_content_hash ^)
+  prefix=.
+else
+  hash=$(cache_content_hash "^$ci3_rel")
+  prefix=./$ci3_rel
+fi
 
 function test_cmds {
   for f in tests/*; do
-    echo "$hash ./ci3/$f"
+    echo "$hash $prefix/$f"
   done
-  echo "$hash ./ci3/semver test"
+  echo "$hash $prefix/semver test"
 }
 
 function test {

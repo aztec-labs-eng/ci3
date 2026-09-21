@@ -7,7 +7,7 @@
 # Or as a denoiser where you want no output unless the command fails:
 #   dump_fail some_command > /dev/null
 set -uo pipefail
-source $(git rev-parse --show-toplevel)/ci3/source_color
+source $(dirname "${BASH_SOURCE[0]}")/source_color
 
 if [ "$#" -lt 1 ]; then
   echo "Usage: $0 <command> [args...]"

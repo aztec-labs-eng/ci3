@@ -5,7 +5,7 @@
 # In non-interactive mode: just prints message and newline
 # On failure: outputs dump_fail style error info
 set -uo pipefail
-source $(git rev-parse --show-toplevel)/ci3/source_color
+source $(dirname "${BASH_SOURCE[0]}")/source_color
 
 if [ "$#" -ne 2 ]; then
   echo "Usage: $0 <message> <command>"

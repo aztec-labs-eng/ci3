@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Uses strict scheduling to run benchmarks in parallel on their own cpus.
 # For benchmarks that can't be parallelized, runs them one at a time to avoid resource contention.
-NO_CD=1 source $(git rev-parse --show-toplevel)/ci3/source
+NO_CD=1 source $(dirname "${BASH_SOURCE[0]}")/source
 
 bench_cmds_file=$1
 

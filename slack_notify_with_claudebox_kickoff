@@ -14,7 +14,7 @@ set -eu
 # Optional: CLAUDEBOX_REPO (default: this repository) -- the repo
 #           whose claudebox.yml is dispatched (holds the CLAUDEBOX_API_SECRET).
 
-NO_CD=1 source "$(git rev-parse --show-toplevel)/ci3/source_base"
+NO_CD=1 source "$(dirname "${BASH_SOURCE[0]}")/source_base"
 source "$ci3/source_stdlib"
 
 if [[ "${CI:-}" != "1" ]]; then

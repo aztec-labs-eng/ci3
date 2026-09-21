@@ -1,12 +1,25 @@
 # Most basic setup.
 # Should work on old versions of bash.
 
+# ci3 is wherever this file lives: a submodule of the repository being built, or its own
+# checkout. Resolved before the cd below, while a relative BASH_SOURCE is still valid.
+# We export so we can use from exported functions.
+export ci3="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+
+# root is the repository being built. From a working directory inside the ci3 submodule,
+# git reports ci3 itself as the top level, so step out to the superproject; standalone,
+# there is none and ci3 is the root.
+if [ -z "${root:-}" ]; then
+  root=$(git rev-parse --show-toplevel)
+  if [ "$root" == "$ci3" ]; then
+    superproject=$(git rev-parse --show-superproject-working-tree)
+    root=${superproject:-$root}
+  fi
+fi
+export root
+
 # Enter our script directory, allowing usage of scripts from any directory.
 [ -z "${NO_CD:-}" ] && cd "$(dirname $0)"
-
-# We export so we can use from exported functions.
-export root=${root:-$(git rev-parse --show-toplevel)}
-export ci3="$root/ci3"
 
 # Update PATH with ci3 tools.
 if [[ "$PATH" != *"$ci3:" ]]; then

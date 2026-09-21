@@ -9,7 +9,7 @@ if (( BASH_VERSINFO[0] < 5 )); then
   exit 1
 fi
 
-source $(git rev-parse --show-toplevel)/ci3/source
+source $(dirname "${BASH_SOURCE[0]}")/source
 
 # Silence parallel citation message.
 mkdir -p $HOME/.parallel

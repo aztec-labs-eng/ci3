@@ -4,7 +4,7 @@
 # Avoids nerfing self when checking out different commits.
 {
 
-NO_CD=1 source $(git rev-parse --show-toplevel)/ci3/source
+NO_CD=1 source $(dirname "${BASH_SOURCE[0]}")/source
 
 full_cmd="$1"
 timeout="${2:-10m}"

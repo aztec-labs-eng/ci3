@@ -88,6 +88,7 @@ if [ -z "${COMMIT_AUTHOR:-}" ]; then
   export COMMIT_AUTHOR="$(git log -1 --pretty=format:"%an")"
 fi
 
-if [ -z "${CURRENT_VERSION:-}" ]; then
+# Not every repository ci3 builds is released with release-please (ci3 itself is not).
+if [ -z "${CURRENT_VERSION:-}" ] && [ -f "$root/.release-please-manifest.json" ]; then
   export CURRENT_VERSION=$(jq -r '."."' $root/.release-please-manifest.json)
 fi

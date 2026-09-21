@@ -4,7 +4,7 @@
 # an intermediate copy on disk. Exits non-zero on a miss; callers run under pipefail, so
 # `if ! cache_download_stream x.zst | consumer; then ...` correctly takes the miss branch.
 # Honors CACHE_LOCAL_DIR the same way cache_download does.
-NO_CD=1 source ${root:-$(git rev-parse --show-toplevel)}/ci3/source
+NO_CD=1 source $(dirname "${BASH_SOURCE[0]}")/source
 
 if [ "$#" -ne 1 ]; then
   echo_stderr "Usage: $0 <name.zst> | <consumer>"

@@ -5,7 +5,7 @@
 #   CI_USE_SSH=0  → SSM RunShellScript (no SSH)
 # Both modes use instance profiles for AWS credentials.
 
-NO_CD=1 source $(git rev-parse --show-toplevel)/ci3/source
+NO_CD=1 source $(dirname "${BASH_SOURCE[0]}")/source
 source $ci3/source_refname
 
 cmd=${1:?usage: $(basename "$0") '<command-to-run-inside-devbox>'}

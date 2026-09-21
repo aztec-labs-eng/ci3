@@ -5,7 +5,7 @@
 # objects written by this script are NOT readable by cache_download and vice versa.
 # Always consumes stdin fully, even when the upload is skipped, so producers are not killed by
 # SIGPIPE under pipefail.
-NO_CD=1 source ${root:-$(git rev-parse --show-toplevel)}/ci3/source
+NO_CD=1 source $(dirname "${BASH_SOURCE[0]}")/source
 
 if [ "$#" -ne 1 ]; then
   echo_stderr "Usage: <producer> | $0 <name.zst>"
