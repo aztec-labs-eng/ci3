@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# The npm dist-tag a version publishes under. Shared by deploy_npm (publishing from a build) and
+# publish_npm_release (publishing a packed bundle from a GitHub runner) so the two agree.
+#   usage: npm_dist_tag <version>
+#
+# A stable release takes 'latest'; the nightly and rc channels share 'prerelease'; every other
+# channel gets a dist-tag of its own. Sharing is a closed set on purpose: a 'commit' canary cut
+# from a pull request carries that branch's manifest version, so it can be newer than the newest
+# nightly and would otherwise repoint 'prerelease' at an unmerged build. Prerelease versions are
+# installed by exact version anyway.
+NO_CD=1 source $(dirname "${BASH_SOURCE[0]}")/source
+
+prerelease=$(semver prerelease "${1:?usage: npm_dist_tag <version>}")
+channel=${prerelease%%.*}
+case "$channel" in
+  "") echo latest ;;
+  nightly | rc) echo prerelease ;;
+  *) echo "$channel" ;;
+esac
