@@ -5,23 +5,49 @@ version=$1
 
 dry_run=${DRY_RUN:-0}
 
-# A stable release takes 'latest'; the nightly and rc channels share 'prerelease'; every other
-# channel gets a dist-tag of its own. Sharing is a closed set on purpose: a 'commit' canary cut
-# from a pull request carries that branch's manifest version, so it can be newer than the newest
-# nightly and would otherwise repoint 'prerelease' at an unmerged build. Prerelease versions are
-# installed by exact version anyway.
-prerelease=$(semver prerelease $version)
-channel=${prerelease%%.*}
-case "$channel" in
-  "") npm_tag="latest" ;;
-  nightly | rc) npm_tag="prerelease" ;;
-  *) npm_tag="$channel" ;;
-esac
+npm_tag=$(npm_dist_tag $version)
 
 # Route our scopes at NPM_REGISTRY and authenticate with whatever credential the environment set.
 source $ci3/source_npm_auth
 
 package_name=$(jq -r '.name' package.json)
+
+# Create temp directory for publishing
+tmpdir=$(mktemp -d)
+function cleanup {
+  rm -rf "$tmpdir"
+}
+trap cleanup SIGINT SIGTERM EXIT
+
+# Use npm pack instead of yarn pack. yarn pack fails on portal: dependencies (e.g. bb.js)
+# because its beforeWorkspacePacking hook can't resolve workspace:^ for portal links.
+# npm pack just packs the files without trying to resolve workspace refs.
+npm pack --pack-destination "$tmpdir" --quiet >/dev/null
+
+# Extract and prepare
+cd "$tmpdir"
+tar -xzf *.tgz
+cd package
+
+# Replace workspace:^ with concrete versions.
+release_prep_package_json $version
+
+# Pack mode: with NPM_PACK_DIR set, the release build only produces the publishable tarball (the
+# same version stamping and workspace rewriting as a publish) and drops it into that directory,
+# recording it in the directory's manifest in call order. The bundle is then published elsewhere
+# by publish_npm_release, which also decides the dist-tags, so nothing below touches a registry
+# and the build machine needs no npm credential.
+pack_dir=${NPM_PACK_DIR:-}
+if [ -n "$pack_dir" ]; then
+  echo_header "packing $package_name"
+  mkdir -p "$pack_dir"
+  # The pack above already ran the package's prepack scripts inside its workspace; this extracted
+  # copy has no workspace, so they must not run again (same reason publish uses --ignore-scripts).
+  tgz=$(npm pack --ignore-scripts --pack-destination "$pack_dir" --quiet)
+  echo "$tgz" >> "$pack_dir/manifest"
+  exit 0
+fi
+
 echo_header "publishing $package_name"
 
 published_version=$(npm show . version --tag $npm_tag 2>/dev/null | grep -vE '^@' || true)
@@ -65,26 +91,6 @@ function drop_tmp_tag {
     npm dist-tag rm "$package_name" "$tmp_tag"
   fi
 }
-
-# Create temp directory for publishing
-tmpdir=$(mktemp -d)
-function cleanup {
-  rm -rf "$tmpdir"
-}
-trap cleanup SIGINT SIGTERM EXIT
-
-# Use npm pack instead of yarn pack. yarn pack fails on portal: dependencies (e.g. bb.js)
-# because its beforeWorkspacePacking hook can't resolve workspace:^ for portal links.
-# npm pack just packs the files without trying to resolve workspace refs.
-npm pack --pack-destination "$tmpdir" --quiet
-
-# Extract and prepare
-cd "$tmpdir"
-tar -xzf *.tgz
-cd package
-
-# Replace workspace:^ with concrete versions.
-release_prep_package_json $version
 
 # Publish from temp dir
 if [ "$dry_run" -eq 1 ]; then

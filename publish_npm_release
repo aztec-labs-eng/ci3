@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# Publishes the npm tarballs a release build packed (deploy_npm with NPM_PACK_DIR) to npmjs with
+# npm trusted publishing: the GitHub runner's OIDC token is the only credential, and --provenance
+# links every package to the workflow run that published it. Requires npm >= 11.5.1.
+#
+# The bundle directory is treated as data, never code: the tarballs are published as-is with their
+# scripts ignored, and this script alone decides which names, which version and which dist-tags.
+#   usage: publish_npm_release <dir>
+# EXPECTED_VERSION (default: GITHUB_REF_NAME without its leading v) is the only version accepted.
+# DRY_RUN=1 runs `npm publish --dry-run` instead.
+NO_CD=1 source $(dirname "${BASH_SOURCE[0]}")/source
+
+# Absolute: npm parses a relative "dir/name.tgz" as the GitHub shorthand owner/repo.
+dir=$(realpath "${1:?usage: $(basename "$0") <dir>}")
+dry_run=${DRY_RUN:-0}
+
+# A token here means a caller wired one in, which is exactly what this path exists to remove.
+if [ -n "${NPM_TOKEN:-}" ]; then
+  echo_stderr "NPM_TOKEN is set. Trusted publishing takes no token; unset it."
+  exit 1
+fi
+
+expected_version=${EXPECTED_VERSION:-${GITHUB_REF_NAME#v}}
+if [ -z "$expected_version" ]; then
+  echo_stderr "EXPECTED_VERSION or GITHUB_REF_NAME required."
+  exit 1
+fi
+
+# The manifest is the publish order (deploy_npm appends in the order the build called it, which
+# is topological), and the bundle must match it exactly either way: an extra tarball is one the
+# build did not produce, a missing one is a bundle from a build that died part-way.
+if [ ! -f "$dir/manifest" ]; then
+  echo_stderr "No manifest in $dir."
+  exit 1
+fi
+mapfile -t manifest < "$dir/manifest"
+if ! diff <(printf '%s\n' "${manifest[@]}" | sort) <(cd "$dir" && ls *.tgz | sort); then
+  echo_stderr "Tarballs in $dir do not match its manifest (see diff above)."
+  exit 1
+fi
+
+function publish_one {
+  local tgz=$1
+  local pkg_json name version npm_tag published_version publish_tag
+  pkg_json=$(tar -xOzf "$tgz" package/package.json)
+  name=$(jq -r .name <<<"$pkg_json")
+  version=$(jq -r .version <<<"$pkg_json")
+  if [[ ! "$name" =~ ^@aztec-labs/ ]]; then
+    echo_stderr "Refusing to publish unexpected package name '$name' from $(basename "$tgz")."
+    exit 1
+  fi
+  if [ "$version" != "$expected_version" ]; then
+    echo_stderr "Refusing $name@$version: this release publishes only version $expected_version."
+    exit 1
+  fi
+  npm_tag=$(npm_dist_tag "$version")
+  echo_header "publishing $name@$version ($npm_tag)"
+
+  if [ "$dry_run" -eq 1 ]; then
+    npm publish "$tgz" --ignore-scripts --dry-run --tag "$npm_tag" --access public
+    return
+  fi
+
+  published_version=$(npm view "$name" "dist-tags.$npm_tag" 2>/dev/null || true)
+  if npm view "$name@$version" version >/dev/null 2>&1; then
+    # A re-run of a release: the version is already out. Trusted publishing authorizes only
+    # `npm publish`, so a dist-tag that ended up elsewhere is a manual repair, not a retry.
+    if [ "$published_version" = "$version" ]; then
+      echo "$name@$version already published; '$npm_tag' already points at it."
+    else
+      echo "$name@$version already published; '$npm_tag' points at '${published_version:-none}'."
+      echo "To move it (needs npm auth): npm dist-tag add $name@$version $npm_tag"
+    fi
+    return
+  fi
+
+  # A version older than what its dist-tag already points at must not take it: publishing a patch
+  # to an old release line, or re-running an old tag's workflow, would otherwise repoint 'latest'
+  # (or 'prerelease', or a channel's own tag) backwards for everyone. npm attaches a dist-tag to
+  # every publish, so such a version takes a fixed tag nothing reads instead. deploy_npm drops that
+  # tag again afterwards; without dist-tag rights this cannot, so it stays, pointing at whatever
+  # out-of-order version was published last. An exact version and a range like '@5' both resolve
+  # against the published versions and consult no tag, so it costs nothing.
+  publish_tag=$npm_tag
+  if [ -n "$published_version" ] && [ "$(semver sort "$published_version" "$version" | tail -1)" != "$version" ]; then
+    echo "Version $version is older than the published $npm_tag ($published_version);"
+    echo "publishing it without moving '$npm_tag'."
+    publish_tag=tmp-publish
+  fi
+  retry "npm publish \"$tgz\" --ignore-scripts --tag \"$publish_tag\" --access public --provenance"
+}
+
+for tgz in "${manifest[@]}"; do
+  publish_one "$dir/$tgz"
+done
