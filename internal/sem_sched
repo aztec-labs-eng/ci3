@@ -3,15 +3,17 @@ source $(dirname "${BASH_SOURCE[0]}")/../source
 
 # Configuration
 SHM_FILE="/dev/shm/cpu_alloc.shm"
-SEM_BIN="./semc"
+# Absolute: sourcing ../source cd's into this script's directory, and the binary is built
+# next to its source rather than relative to wherever that is.
+SEM_BIN="$ci3/internal/semc"
 MUTEX_NAME="/cpu_alloc_mutex"
 FREE_SEM="/cpu_alloc_free"
 NUMA_FILE="/dev/shm/cpu_numa.shm"
 
 function init {
   # Build semc if not already built.
-  if [ ! -f "$ci3/$SEM_BIN" ]; then
-    gcc -O3 -o "$ci3/$SEM_BIN" "$ci3/internal/semc.c"
+  if [ ! -x "$SEM_BIN" ]; then
+    gcc -O3 -o "$SEM_BIN" "$ci3/internal/semc.c"
   fi
 
   # Initialize shared memory and free semaphore if not already created.
