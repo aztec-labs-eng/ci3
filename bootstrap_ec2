@@ -206,10 +206,10 @@ container_script=$(
   # anything sources it.
   git submodule update --init --depth 1 ci3
   # Commits the private patch before ci3/source derives COMMIT_HASH from HEAD. Its output is replayed
-  # in run: ci3/ssm_send_command shows only stderr, and only on failure.
+  # in run: ci3/internal/ssm_send_command shows only stderr, and only on failure.
   private_release_patch_log=
   if [ "\${RELEASE_TARGET:-}" = private ]; then
-    private_release_patch_log=\$(ci3/apply_private_release_patch)
+    private_release_patch_log=\$(ci3/internal/apply_private_release_patch)
   fi
   source ci3/source
   ci_log_id=\$CI_LOG_ID
