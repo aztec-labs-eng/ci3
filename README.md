@@ -122,10 +122,10 @@ The dependency runs both ways. ci3 reads these from the repository it is buildin
 - `scripts/process_flake_log.py` — optional; run by `parallelize` after a test run when present.
 - `.release-please-manifest.json` — optional; the source of `CURRENT_VERSION`.
 - `build-images/src/home/.gitconfig` — mounted into containers by `docker_isolate`.
-- `scripts/prep_ci3.sh` — optional; makes the ci3 submodule present and at its pinned commit.
-  `bootstrap_ec2` runs it on build instances, falling back to a plain `git submodule update --init`
-  when the repository does not have it. The repository's own entry points run it before sourcing
-  ci3, so a fresh clone works without a manual submodule update.
+- `./bootstrap.sh init` — makes the ci3 submodule present and at its pinned commit, without
+  sourcing ci3 or doing anything else. `bootstrap_ec2` runs it on build instances right after the
+  checkout, and the repository's own scripts and workflows run it before sourcing ci3, so a fresh
+  clone works without a manual submodule update.
 
 ### State shared between versions
 

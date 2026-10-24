@@ -203,9 +203,8 @@ container_script=$(
   git checkout FETCH_HEAD
   git checkout -b \$REF_NAME
   # ci3 is a submodule and the shallow fetch above does not bring it: prepare it before anything
-  # sources it, with the repository's own script when it has one, so build instances and
-  # developers take the same path.
-  if [ -x scripts/prep_ci3.sh ]; then scripts/prep_ci3.sh; else git submodule update --init --depth 1 ci3; fi
+  # sources it, through the repository's own entry point, as developers and workflows do.
+  ./bootstrap.sh init
   # Commits the private patch before ci3/source derives COMMIT_HASH from HEAD. Its output is replayed
   # in run: ci3/internal/ssm_send_command shows only stderr, and only on failure.
   private_release_patch_log=
