@@ -3,4 +3,4 @@
 NO_CD=1 source $(dirname "${BASH_SOURCE[0]}")/../source
 
 # Use get_test_entry to get matching entries, then extract unique owners
-get_test_entry "$@" | jq -r '.owners[]' | sort -u
+get_test_entry "$@" | jq -r '.owners[]?' | sort -u
