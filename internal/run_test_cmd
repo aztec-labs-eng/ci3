@@ -307,15 +307,15 @@ function post_github_failure_status {
     -d "$body" &
 }
 
-# Post a message to the Slack channel (default #aztec3-ci) of each matching .test_patterns.yml entry whose "on" list
-# (default [flake]) includes the event, mentioning the owners of the entries that share the channel.
+# Post a message to the Slack channel (default #aztec3-ci) of each matching .test_patterns.yml entry whose notify_on
+# list (default [flake]) includes the event, mentioning the owners of the entries that share the channel.
 function slack_notify_entries {
   local event=$1 msg=$2
   local channel mentions
   while IFS=$'\t' read -r channel mentions; do
     slack_notify "${mentions:+$mentions: }$msg" "$channel"
   done < <(echo "$test_entries" | jq -rs --arg event "$event" '
-    map(select([.on // "flake"] | flatten | any(. == $event))) | group_by(.channel // "#aztec3-ci")[]
+    map(select([.notify_on // "flake"] | flatten | any(. == $event))) | group_by(.channel // "#aztec3-ci")[]
     | [.[0].channel // "#aztec3-ci", ([.[].owners[]?] | unique | map("<@\(.)>") | join(" "))] | @tsv')
 }
 
