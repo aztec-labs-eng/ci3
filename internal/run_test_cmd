@@ -54,9 +54,6 @@ if [ "$CI" -eq 1 ]; then
     slack_notify_flake=1
     slack_notify_fail=1
   fi
-
-  # Notify on fails for scenario tests.
-  [[ ${SCENARIO_TESTS:-0} -eq 1 ]] && slack_notify_fail=1
 fi
 
 # Env overrides.
@@ -310,14 +307,15 @@ function post_github_failure_status {
     -d "$body" &
 }
 
-# Post a message to the Slack channel of each given .test_patterns.yml entry, mentioning the owners of the entries that
-# share it. Entries without a channel go to #aztec3-ci.
+# Post a message to the Slack channel (default #aztec3-ci) of each matching .test_patterns.yml entry whose "on" list
+# (default [flake]) includes the event, mentioning the owners of the entries that share the channel.
 function slack_notify_entries {
-  local entries=$1 msg=$2
+  local event=$1 msg=$2
   local channel mentions
   while IFS=$'\t' read -r channel mentions; do
     slack_notify "${mentions:+$mentions: }$msg" "$channel"
-  done < <(echo "$entries" | jq -rs 'group_by(.channel // "#aztec3-ci")[]
+  done < <(echo "$test_entries" | jq -rs --arg event "$event" '
+    map(select([.on // "flake"] | flatten | any(. == $event))) | group_by(.channel // "#aztec3-ci")[]
     | [.[0].channel // "#aztec3-ci", ([.[].owners[]?] | unique | map("<@\(.)>") | join(" "))] | @tsv')
 }
 
@@ -340,11 +338,7 @@ function fail {
   [ "$CI" -eq 1 ] && post_github_failure_status
 
   if [ "$slack_notify_fail" -eq 1 ]; then
-    local fail_msg="Test FAILED on *${TARGET_BRANCH:-$REF_NAME}*: \`$test_cmd\` $DASHBOARD_URL/$log_key"
-    if [ "${SCENARIO_TESTS:-0}" -eq 1 ]; then
-      slack_notify "$fail_msg" "#alerts-next-scenario"
-    fi
-    slack_notify_entries "$(echo "$test_entries" | jq -c 'select(.channel)')" "$fail_msg"
+    slack_notify_entries fail "Test FAILED on *${TARGET_BRANCH:-$REF_NAME}*: \`$test_cmd\` $DASHBOARD_URL/$log_key"
   fi
 
   exit $code
@@ -370,7 +364,7 @@ function flake {
   fi
 
   if [ "$slack_notify_flake" -eq 1 ]; then
-    slack_notify_entries "$test_entries" "Test flaked on *${TARGET_BRANCH:-$REF_NAME}*: \`$test_cmd\` $DASHBOARD_URL/$log_key"
+    slack_notify_entries flake "Test flaked on *${TARGET_BRANCH:-$REF_NAME}*: \`$test_cmd\` $DASHBOARD_URL/$log_key"
   fi
 
   exit 0
@@ -387,15 +381,12 @@ test_entries=$(get_test_entry "$test_cmd" "$tmp_file")
 # If flakes are not allowed, fail the test.
 [ "$allow_flakes" -eq 0 ] && fail
 
-# Extract owners from entries
-owners=$(echo "$test_entries" | jq -r '.owners[]?' | sort -u)
-
 # Extract flake_group_id from first matching entry
 flake_group_id=$(echo "$test_entries" | jq -r '.flake_group_id // empty' | head -1)
 
-# If there's no owner for a failed test, we consider it a hard fail.
+# If no matching entry has retry: true, we consider the failure a hard fail.
 # Otherwise we perform a single retry.
-if [ -z "$owners" ]; then
+if ! jq -se 'any(.retry == true)' <<< "$test_entries" > /dev/null; then
   fail
 else
   failure_log_key=$log_key
