@@ -10,7 +10,6 @@ import os
 import re
 import requests
 import shlex
-import subprocess
 import threading
 import time as _time
 import uuid
@@ -27,47 +26,10 @@ S3_LOGS_PREFIX = os.getenv('S3_LOGS_PREFIX', 'logs')
 
 _s3 = boto3.client('s3', region_name='us-east-2', config=Config(connect_timeout=10, read_timeout=60, retries={'max_attempts': 3}))
 DASHBOARD_PASSWORD = os.getenv('DASHBOARD_PASSWORD', '')
-CI_METRICS_PORT = int(os.getenv('CI_METRICS_PORT', '8081'))
-CI_METRICS_URL = os.getenv('CI_METRICS_URL', f'http://localhost:{CI_METRICS_PORT}')
 
 app = Flask(__name__)
 Compress(app)
 auth = HTTPBasicAuth()
-
-# Start the ci-metrics server as a subprocess (once across all workers).
-# Uses a file lock so only the first gunicorn worker to import this module
-# actually spawns the process; the rest skip silently.
-import fcntl
-import signal
-
-_ci_metrics_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ci-metrics')
-if os.path.isdir(_ci_metrics_dir):
-    _lock_path = f'/tmp/ci-metrics-{CI_METRICS_PORT}.lock'
-    try:
-        _lock_fd = open(_lock_path, 'w')
-        fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        # We hold the lock — kill stale process and spawn fresh one
-        try:
-            out = subprocess.check_output(
-                ['lsof', '-ti', f':{CI_METRICS_PORT}'], stderr=subprocess.DEVNULL, text=True)
-            for pid in out.strip().split('\n'):
-                if pid:
-                    os.kill(int(pid), signal.SIGTERM)
-            _time.sleep(0.5)
-        except (subprocess.CalledProcessError, OSError):
-            pass
-        _ci_metrics_env = {**os.environ, 'CI_METRICS_PORT': str(CI_METRICS_PORT)}
-        subprocess.Popen(
-            ['gunicorn', '-w', '1', '-b', f'0.0.0.0:{CI_METRICS_PORT}',
-             '--timeout', '120', 'app:app'],
-            cwd=_ci_metrics_dir,
-            env=_ci_metrics_env,
-        )
-        print(f"[rk.py] ci-metrics server started on port {CI_METRICS_PORT}")
-        # Hold the lock until this process exits so other workers skip
-    except OSError:
-        # Another worker already holds the lock — nothing to do
-        pass
 
 # Conditional auth decorator - only require auth if password is set
 def optional_auth(f):
@@ -231,11 +193,8 @@ def root() -> str:
         out += "\n"
 
     out += (
-        f"CI Metrics:\n"
+        f"Benchmarks:\n"
         f"\n{YELLOW}"
-        f"{hyperlink('/cost-overview', 'cost overview (AWS + GCP)')}\n"
-        f"{hyperlink('/namespace-billing', 'namespace billing')}\n"
-        f"{hyperlink('/ci-insights', 'ci insights')}\n"
         f"{hyperlink('/chonk-breakdowns', 'chonk breakdowns')}\n"
         f"{RESET}"
     )
@@ -501,59 +460,6 @@ def get_breakdown(runtime, flow_name, sha):
         return Response(breakdown_data, mimetype='application/json')
 
     return Response('{"error": "Breakdown not found"}', mimetype='application/json', status=404)
-
-# ---- Reverse proxy to ci-metrics server ----
-
-_proxy_session = requests.Session()
-_HOP_BY_HOP = frozenset([
-    'connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
-    'te', 'trailers', 'transfer-encoding', 'upgrade',
-])
-_STRIP_REQUEST_HEADERS = frozenset(['host'])
-
-def _proxy(path):
-    """Forward request to ci-metrics, streaming the response back.
-
-    Passes the browser's Accept-Encoding through to ci-metrics so it
-    compresses directly for the browser.  We stream the raw (still
-    compressed) bytes back without decompression.
-    """
-    url = f'{CI_METRICS_URL}/{path.lstrip("/")}'
-    try:
-        fwd_headers = {k: v for k, v in request.headers if k.lower() not in _STRIP_REQUEST_HEADERS}
-        resp = _proxy_session.request(
-            method=request.method,
-            url=url,
-            params=request.args,
-            data=request.get_data(),
-            headers=fwd_headers,
-            stream=True,
-            timeout=180,
-        )
-        # Stream raw bytes (skip requests auto-decompression)
-        headers = {k: v for k, v in resp.headers.items() if k.lower() not in _HOP_BY_HOP}
-        return Response(resp.raw.stream(8192),
-                        status=resp.status_code, headers=headers)
-    except Exception as e:
-        return Response(json.dumps({'error': f'ci-metrics unavailable: {e}'}),
-                        mimetype='application/json', status=502)
-
-@app.route('/namespace-billing')
-@app.route('/ci-health')
-@app.route('/ci-insights')
-@app.route('/cost-overview')
-@app.route('/test-timings')
-@app.route('/ci-health-report')
-@app.route('/flake-prs')
-@auth.login_required
-def proxy_dashboard():
-    return _proxy(request.path)
-
-
-@app.route('/api/<path:path>', methods=['GET', 'POST', 'PUT', 'DELETE'])
-@auth.login_required
-def proxy_api(path):
-    return _proxy(f'/api/{path}')
 
 # The ci3 server API (ci3/CI3_SERVER_API.md in aztec-packages): what the ci3 scripts talk to.
 import ci3_api
