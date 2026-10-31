@@ -230,6 +230,8 @@ def root() -> str:
             out += f"  {YELLOW}{hyperlink('/section/' + d, section)}{RESET}\n"
         out += "\n"
 
+    out += bench_listing()
+
     out += (
         f"CI Metrics:\n"
         f"\n{YELLOW}"
@@ -239,6 +241,26 @@ def root() -> str:
         f"{hyperlink('/chonk-breakdowns', 'chonk breakdowns')}\n"
         f"{RESET}"
     )
+    return out
+
+def bench_listing() -> str:
+    try:
+        dashboards = list_bench_dashboards()
+    except Exception as e:
+        print(f"Error listing benchmark series: {e}")
+        return f"Benchmarks:\n\n{RED}(unavailable){RESET}\n\n"
+    if not dashboards:
+        return ""
+    grouped: dict[str, list[tuple[str, str]]] = {}
+    for d in dashboards:
+        repo, section = _split_dashboard(d)
+        grouped.setdefault(repo, []).append((section, d))
+    out = "Benchmarks:\n\n"
+    for repo in sorted(grouped):
+        out += f"{BOLD}{repo}{RESET}\n"
+        for section, d in sorted(grouped[repo]):
+            out += f"  {YELLOW}{hyperlink('/bench/' + d, section)}{RESET}\n"
+        out += "\n"
     return out
 
 def section_view(section: str) -> str:
@@ -558,6 +580,9 @@ def proxy_api(path):
 # The ci3 server API (ci3/CI3_SERVER_API.md in aztec-packages): what the ci3 scripts talk to.
 import ci3_api
 ci3_api.register(app, optional_auth, _s3, S3_LOGS_BUCKET, S3_LOGS_PREFIX, DASHBOARD_PASSWORD)
+
+import bench
+list_bench_dashboards = bench.register(app, optional_auth, _s3, S3_LOGS_BUCKET)
 
 @app.route('/<key>')
 @optional_auth
