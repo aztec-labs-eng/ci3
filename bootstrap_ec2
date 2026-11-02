@@ -271,6 +271,17 @@ ci_ssm_mode=$((1 - use_ssh))
 
 # --- Host script ---
 # This runs on the EC2 host (either via SSH or SSM).
+# CI3_PASS_ENV names further variables to pass from here into the build container, space-separated, for a consuming
+# repo's own credentials (a token for a private submodule, say). Each is quoted for the host's shell.
+pass_env_args=""
+for pass_env_name in ${CI3_PASS_ENV:-}; do
+  if [[ ! "$pass_env_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+    echo_stderr "CI3_PASS_ENV: not a variable name: $pass_env_name"
+    exit 1
+  fi
+  pass_env_args+=" -e $pass_env_name=$(printf %q "${!pass_env_name:-}")"
+done
+
 host_script=$(
   cat <<EOF
 set -euo pipefail
@@ -430,6 +441,7 @@ start_build() {
     --pids-limit=65536 \
     --shm-size=2g \
     --ulimit nofile=1048576:1048576 \
+    $pass_env_args \
     aztecprotocol/devbox:3.2 bash -c $(printf '%q' "$container_script")
 }
 
