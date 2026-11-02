@@ -40,6 +40,14 @@ function get_num_cpus {
   fi
 }
 
+# Hardware threads per physical core: 2 with SMT (most x86 instance families), 1 without (AMD's m7a/r7a/c7a and later,
+# Graviton). 2 when it cannot be read, as every caller assumed before.
+function get_threads_per_core {
+  local tpc
+  tpc=$(lscpu 2>/dev/null | awk -F: '/^Thread\(s\) per core/ { gsub(/ /, "", $2); print $2 }')
+  [[ "$tpc" =~ ^[1-9][0-9]*$ ]] && echo "$tpc" || echo 2
+}
+
 function get_num_cpus_max {
   local jobs=$(get_num_cpus)
   [ -n "${1:-}" ] && [ "$1" -lt $jobs ] && jobs=$1
@@ -99,4 +107,4 @@ function pr_link {
   fi
 }
 
-export -f hash_str hash_str_orig echo_stderr uuid get_num_cpus get_num_cpus_max urlencode term_link ci_term_link pr_link
+export -f hash_str hash_str_orig echo_stderr uuid get_num_cpus get_num_cpus_max get_threads_per_core urlencode term_link ci_term_link pr_link
