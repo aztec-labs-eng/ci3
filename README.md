@@ -120,7 +120,6 @@ The dependency runs both ways. ci3 reads these from the repository it is buildin
 
 - `.test_patterns.yml` — test skips, retries, owners and Slack notifications (`filter_test_cmds`, `run_test_cmd`).
 - `scripts/process_flake_log.py` — optional; run by `parallelize` after a test run when present.
-- `.release-please-manifest.json` — optional; the source of `CURRENT_VERSION`.
 - `build-images/src/home/.gitconfig` — mounted into containers by `docker_isolate`.
 
 ### State shared between versions
