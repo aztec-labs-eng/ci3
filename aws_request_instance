@@ -32,15 +32,16 @@ declare -A cpu_priority=([128]=1 [192]=2 [64]=3)
 # Capacity-diverse spot pools per cpu count. Restricted to families with
 # >=4 GB/vCPU (m/r) so the build's measured ~1.9 GB/vCPU peak keeps ~2x
 # headroom; c-series (2 GB/vCPU) is opt-in via CI_SPOT_INCLUDE_C. All entries
-# are confirmed offered as spot across every us-east-2 AZ.
+# are confirmed offered as spot across every us-east-2 AZ. The AMD 8th generation has no 32xlarge (its
+# sizes go 16, 24, 48xlarge), so the 128 pool takes only the Intel 8th generation.
 function spot_pools_for {
   local cpu=$1
   case "$arch" in
     x86_64|amd64)
       case "$cpu" in
-        128) echo "m6a.32xlarge m7a.32xlarge m6i.32xlarge r6a.32xlarge r7a.32xlarge" ;;
-        192) echo "m6a.48xlarge m7a.48xlarge m7i.48xlarge r6a.48xlarge r7a.48xlarge" ;;
-        64)  echo "m6a.16xlarge m7a.16xlarge m7i.16xlarge m6i.16xlarge m5.16xlarge r6a.16xlarge" ;;
+        128) echo "m6a.32xlarge m7a.32xlarge m6i.32xlarge r6a.32xlarge r7a.32xlarge m8i.32xlarge r8i.32xlarge" ;;
+        192) echo "m6a.48xlarge m7a.48xlarge m7i.48xlarge r6a.48xlarge r7a.48xlarge m8a.48xlarge r8a.48xlarge m8i.48xlarge r8i.48xlarge" ;;
+        64)  echo "m6a.16xlarge m7a.16xlarge m7i.16xlarge m6i.16xlarge m5.16xlarge r6a.16xlarge m8a.16xlarge r8a.16xlarge m8i.16xlarge r8i.16xlarge" ;;
         *)   local s=${cpu_map[$cpu]:?Unknown cpu count: $cpu}; echo "m6a.$s m7a.$s m6i.$s r6a.$s" ;;
       esac ;;
     arm64)
