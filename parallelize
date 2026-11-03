@@ -44,11 +44,13 @@ else
   parallel $parallel_args 'run_test_cmd {}'
 fi
 
+# SLOW_TEST_SECONDS: a test that runs longer is listed as slow (5 minutes unless the repository sets it).
+slow_secs=${SLOW_TEST_SECONDS:-300}
 slow_jobs=$(cat joblog.txt | \
-  awk 'NR>1 && $4 > 300 {print | "sort -k4,4"}' | \
+  awk -v limit="$slow_secs" 'NR>1 && $4 > limit {print | "sort -k4,4"}' | \
   awk '{print $4 ": " substr($0, index($0, $10))}')
 if [ -n "$slow_jobs" ]; then
-  echo -e "${yellow}WARNING: The following tests exceed 5 minute runtimes. Break them up or rethink them.${reset}"
+  echo -e "${yellow}WARNING: The following tests exceed ${slow_secs}s runtimes. Break them up or rethink them.${reset}"
   echo "$slow_jobs"
 fi
 
