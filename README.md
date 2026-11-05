@@ -127,5 +127,5 @@ The dependency runs both ways. ci3 reads these from the repository it is buildin
 A repository pins its own ci3, and a build can involve more than one pin: a repository and a
 submodule of it each use their own. What has to stay compatible across versions is therefore not
 the scripts but the state they share: redis key shapes (`ci-run-<org>/<repo>/<section>`,
-`history_*`, `hb-*`, the test cache), build-cache artifact names, the `<hash>[:VAR=val] <cmd>`
-test command format, and the dashboard's server API.
+`history_*`, `hb-*`, the test cache), S3 log keys (`logs/<prefix>/<key>.log.gz`), build-cache
+artifact names, and the `<hash>[:VAR=val] <cmd>` test command format.
