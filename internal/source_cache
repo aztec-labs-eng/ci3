@@ -77,37 +77,14 @@ function cache_persistent {
   # the build instance's top-level log is persisted as its last act, and a background upload
   # is killed with the container before it lands.
   if [ "${CACHE_PERSIST_SYNC:-0}" -eq 1 ]; then
-    log_s3_final "$key" "$tmpfile"
+    cat "$tmpfile" | cache_s3_transfer "$key"
     rm -f "$tmpfile"
   else
     {
-      log_s3_final "$key" "$tmpfile"
+      cat "$tmpfile" | cache_s3_transfer "$key"
       rm -f "$tmpfile"
     } >&- 2>&- &
   fi
-}
-
-# Without redis, a log's live copies and its final copy are written to the same S3 object, and
-# each upload is a snapshot of the log when it started. A per-log lock orders them: a live upload
-# skips its turn while another holds the lock, and the final upload waits for it, including one
-# whose publishing loop was killed, then leaves a marker that stops any later live upload. So the
-# final copy is always the last to land.
-function log_s3_lock {
-  echo "${TMPDIR:-/tmp}/ci3_log_$1"
-}
-
-# Usage: log_s3_final <key> <gzip file>
-function log_s3_final {
-  if [ "$CI_REDIS_AVAILABLE" -eq 1 ]; then
-    cache_s3_transfer "$1" < "$2"
-    return
-  fi
-  local lock=$(log_s3_lock "$1")
-  (
-    flock -w 150 9
-    cache_s3_transfer "$1" < "$2"
-    touch "$lock.final"
-  ) 9>"$lock.lock"
 }
 
 # Whether logs reach the dashboard: through redis, or on a CI host without redis (a GitHub
@@ -122,18 +99,11 @@ function log_publish {
   if [ "$CI_REDIS_AVAILABLE" -eq 1 ]; then
     redis_setexz "$1" "$2"
   else
-    local lock=$(log_s3_lock "$1") tmp=$(mktemp)
-    gzip > "$tmp"
-    (
-      flock -n 9 || exit 0
-      [ -f "$lock.final" ] && exit 0
-      # Bounded, so a stuck upload can't hold up the final one waiting on the lock.
-      timeout 120 bash -c 'cache_s3_transfer "$0" < "$1"' "$1" "$tmp"
-    ) 9>"$lock.lock"
-    rm -f "$tmp"
+    # Bounded, so a stuck upload can't hold up the end of the step that waits for it.
+    gzip | timeout 120 bash -c 'cache_s3_transfer "$0"' "$1"
   fi
 }
 
 # Export functions
 export -f cache_s3_transfer cache_s3_transfer_to cache_disk_transfer cache_disk_transfer_to cache_persistent \
-  log_store_available log_publish log_s3_lock log_s3_final
+  log_store_available log_publish
