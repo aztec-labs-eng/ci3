@@ -483,10 +483,6 @@ def get_breakdown(runtime, flow_name, sha):
 
     return Response('{"error": "Breakdown not found"}', mimetype='application/json', status=404)
 
-# The ci3 server API (ci3/CI3_SERVER_API.md in aztec-packages): what the ci3 scripts talk to.
-import ci3_api
-ci3_api.register(app, optional_auth, _s3, S3_LOGS_BUCKET, S3_LOGS_PREFIX, DASHBOARD_PASSWORD)
-
 import bench
 list_bench_dashboards = bench.register(app, optional_auth, _s3, S3_LOGS_BUCKET)
 
