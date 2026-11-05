@@ -288,8 +288,9 @@ function post_github_failure_status {
   # Context: ci/<test_cmd>, truncated to 255 chars (GitHub limit).
   local context="ci/${test_cmd}"
   context="${context:0:255}"
-  # Description: truncated to 140 chars (GitHub limit).
-  local description="${test_cmd}"
+  # Description: tagged with the job so clear_github_failure_statuses can clear it once the job passes,
+  # truncated to 140 chars (GitHub limit).
+  local description="[${JOB_ID:-bootstrap}] ${test_cmd}"
   description="${description:0:140}"
 
   local body
