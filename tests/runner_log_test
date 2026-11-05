@@ -33,6 +33,8 @@ aws $S3_BUILD_CACHE_AWS_PARAMS s3 mb s3://aztec-ci-artifacts > /dev/null
 # A runner: in CI, no redis. CI_REDIS_AVAILABLE is set so source_redis never probes a host,
 # which on a developer machine can be a tunnel to the CI redis.
 export CI=1 CI_REDIS_AVAILABLE=0 LOG_PUBLISH_INTERVAL=1 GITHUB_TOKEN= DENOISE=1
+# Pinned, so a local ci-redis container doesn't switch links to a local dashboard.
+export DASHBOARD_URL=http://ci.aztec-labs.com
 
 s3_log() { # <key> -> the log, or nothing if absent
   aws $S3_BUILD_CACHE_AWS_PARAMS s3 cp "s3://aztec-ci-artifacts/logs/${1:0:4}/$1.log.gz" - 2>/dev/null | gunzip || true
@@ -61,7 +63,7 @@ pass "the final log is never overwritten by a live publish"
 
 # denoise: its log id is printed, and the log is in S3 by the time it returns.
 out=$("$CI3/denoise" "echo from-denoise; sleep 2")
-key=$(grep -o 'ci.aztec-labs.com/[0-9a-f-]*' <<<"$out" | head -1 | cut -d/ -f2)
+key=$(grep -o 'ci.aztec-labs.com/[0-9a-f-]*' <<<"$out" | head -1 | cut -d/ -f2 || true)
 [ -n "$key" ] || fail "denoise prints its log link: $out"
 final=$(s3_log $key)
 grep -q "from-denoise" <<<"$final" || fail "denoise's final log is in S3: $final"

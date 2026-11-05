@@ -104,15 +104,9 @@ function log_publish {
   fi
 }
 
-# Seconds between live publishes of a growing log. S3 puts are slower and billed per request.
+# Seconds between live publishes of a log while it changes.
 function log_publish_interval {
-  if [ -n "${LOG_PUBLISH_INTERVAL:-}" ]; then
-    echo $LOG_PUBLISH_INTERVAL
-  elif [ "$CI_REDIS_AVAILABLE" -eq 1 ]; then
-    echo 5
-  else
-    echo 30
-  fi
+  echo ${LOG_PUBLISH_INTERVAL:-5}
 }
 
 # Export functions
