@@ -33,7 +33,7 @@ function publish_log {
 function publish_log_final {
   finalize_log
   # Synchronous: this is the run's top-level log and the instance goes away right after.
-  cat $outfile | CACHE_PERSIST_SYNC=1 cache_persistent $key $CI_REDIS_EXPIRE
+  cat $outfile | LOG_PUBLISH_SYNC=1 log_publish $key $CI_REDIS_EXPIRE final
 }
 
 # Stopped with SIGTERM. bash runs the trap only once the command in progress has finished, so an

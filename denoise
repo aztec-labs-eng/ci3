@@ -74,16 +74,11 @@ function format_log_output {
 }
 
 function publish_log {
-  log_store_available || return 0
   format_log_output | log_publish $key $CI_REDIS_EXPIRE
 }
 
 function publish_log_final {
-  log_store_available || return 0
-  # Without redis the S3 copy is the only one, so it must land before a runner's step ends.
-  local sync=0
-  [ "$CI_REDIS_AVAILABLE" -eq 1 ] || sync=1
-  format_log_output | CACHE_PERSIST_SYNC=$sync cache_persistent $key $CI_REDIS_EXPIRE
+  format_log_output | log_publish $key $CI_REDIS_EXPIRE final
 }
 
 # Stopped with SIGTERM. bash runs the trap only once the command in progress has finished, so an
