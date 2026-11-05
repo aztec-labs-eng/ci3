@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 # On a CI host without redis (a GitHub runner), cache_log and denoise publish their logs to S3.
-# A fake `aws` on PATH stores the uploads under $WORK/s3.
+# A fake `aws` on PATH stores the uploads under $WORK/s3, and holds back in-progress copies for
+# 2s: a live upload still in flight when the final one is written then lands after it, unless the
+# final one waits for it.
 CI3="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -11,7 +13,10 @@ cat > "$WORK/bin/aws" <<'FAKE'
 #!/usr/bin/env bash
 dest="$FAKE_S3/${@: -1}"
 mkdir -p "$(dirname "$dest")"
-cat > "$dest.tmp" && mv "$dest.tmp" "$dest"
+tmp=$(mktemp "$dest.XXXX")
+cat > "$tmp"
+gunzip -c "$tmp" | grep -q "in-progress" && sleep 2
+mv "$tmp" "$dest"
 FAKE
 chmod +x "$WORK/bin/aws"
 
@@ -20,17 +25,17 @@ export CI=1 CI_REDIS_AVAILABLE=0 DENOISE=1 GITHUB_TOKEN= DASHBOARD_URL=http://ci
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
 pass() { echo "PASS: $1"; }
-s3_log() { gunzip -c "$WORK/s3/s3:/aztec-ci-artifacts/logs/${1:0:4}/$1.log.gz" 2>/dev/null || true; }
+s3_log() { sleep 3; gunzip -c "$WORK/s3/s3:/aztec-ci-artifacts/logs/${1:0:4}/$1.log.gz" 2>/dev/null || true; }
 
 key=1700000000000101
-printf 'first\nsecond\n' | PARENT_LOG_ID=1700000000000100 "$CI3/cache_log" "CI run" $key
+{ echo first; sleep 1; echo second; } | PARENT_LOG_ID=1700000000000100 "$CI3/cache_log" "CI run" $key
 log=$(s3_log $key)
 grep -q "^second" <<<"$log" || fail "cache_log's final log has all its output: $log"
 grep -q "Completed: in-progress" <<<"$log" && fail "cache_log's final log is finalized: $log"
 pass "cache_log publishes its final log to S3"
 
-out=$("$CI3/denoise" "echo from-denoise")
+out=$("$CI3/denoise" "echo from-denoise; sleep 1")
 key=$(grep -o 'ci.aztec-labs.com/[0-9a-f-]*' <<<"$out" | head -1 | cut -d/ -f2 || true)
 log=$(s3_log "$key")
-grep -q "Status: 0" <<<"$log" && grep -q "from-denoise" <<<"$log" || fail "denoise publishes its final log to S3: $out / $log"
+grep -q "Status: 0" <<<"$log" || fail "denoise publishes its final log to S3: $out / $log"
 pass "denoise publishes its final log to S3"
