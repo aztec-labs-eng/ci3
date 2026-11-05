@@ -1,16 +1,26 @@
 #!/usr/bin/env python3
-"""Tests for ci3_api against a real redis (REDIS_HOST/REDIS_PORT) and an in-memory S3.
+"""Tests for ci3_api against a throwaway redis and an in-memory S3.
 
-  REDIS_HOST=127.0.0.1 REDIS_PORT=6379 python3 ci3_api_test.py
+  docker run -d --rm --name ci3-api-test-redis -p 16379:6379 redis:7
+  CI3_API_TEST_REDIS=127.0.0.1:16379 python3 ci3_api_test.py
+
+The tests flush the database between cases, so the target is named explicitly rather than taken
+from REDIS_HOST (localhost:6379 can be a tunnel to the CI redis), and must be empty at the start.
 """
 import base64
 import gzip
 import io
 import json
 import os
+import sys
 import unittest
 
-os.environ.setdefault("REDIS_HOST", "127.0.0.1")
+_target = os.environ.get("CI3_API_TEST_REDIS", "")
+if not _target:
+    sys.exit("CI3_API_TEST_REDIS=<host>:<port> of a throwaway redis is required (see the docstring).")
+_host, _, _port = _target.partition(":")
+os.environ["REDIS_HOST"], os.environ["REDIS_PORT"] = _host, _port or "6379"
+
 from botocore.exceptions import ClientError
 from flask import Flask
 from flask_httpauth import HTTPBasicAuth
@@ -18,6 +28,9 @@ from redis.exceptions import RedisError
 
 import ci3_api
 from rk_core import r
+
+if r.dbsize():
+    sys.exit(f"Refusing to run: the redis at {_target} is not empty, and the tests flush it.")
 
 PASSWORD = "secret"
 AUTH = {"Authorization": "Basic " + base64.b64encode(b"aztec:" + PASSWORD.encode()).decode()}
