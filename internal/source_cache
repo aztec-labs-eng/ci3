@@ -87,5 +87,34 @@ function cache_persistent {
   fi
 }
 
+# Whether logs reach the dashboard: through redis, or on a CI host without redis (a GitHub
+# runner) straight to S3, which the dashboard reads when redis misses.
+function log_store_available {
+  [ "$CI_REDIS_AVAILABLE" -eq 1 ] || [ "${CI:-0}" -eq 1 ]
+}
+
+# Publish an in-progress log (stdin) where log_store_available found a store.
+# Usage: cat log | log_publish <key> <expire>
+function log_publish {
+  if [ "$CI_REDIS_AVAILABLE" -eq 1 ]; then
+    redis_setexz "$1" "$2"
+  else
+    # Bounded, so a stuck upload can't hold up the end of the step that waits for it.
+    gzip | timeout 120 bash -c 'cache_s3_transfer "$0"' "$1"
+  fi
+}
+
+# Seconds between live publishes of a growing log. S3 puts are slower and billed per request.
+function log_publish_interval {
+  if [ -n "${LOG_PUBLISH_INTERVAL:-}" ]; then
+    echo $LOG_PUBLISH_INTERVAL
+  elif [ "$CI_REDIS_AVAILABLE" -eq 1 ]; then
+    echo 5
+  else
+    echo 30
+  fi
+}
+
 # Export functions
-export -f cache_s3_transfer cache_s3_transfer_to cache_disk_transfer cache_disk_transfer_to cache_persistent
+export -f cache_s3_transfer cache_s3_transfer_to cache_disk_transfer cache_disk_transfer_to cache_persistent \
+  log_store_available log_publish log_publish_interval

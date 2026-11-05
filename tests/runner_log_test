@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Tests that cache_log and denoise publish logs to S3 on a CI host without redis (a GitHub
+# runner), live and final, against a throwaway LocalStack S3. Run directly.
+CI3="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WORK=$(mktemp -d)
+container=runner-log-test-$$
+
+cleanup() {
+  docker rm -f "$container" &>/dev/null || true
+  rm -rf "$WORK"
+}
+trap cleanup EXIT
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "PASS: $1"; }
+
+if ! docker info &>/dev/null; then
+  echo "SKIP: docker not available to run LocalStack"
+  exit 0
+fi
+
+docker run -d --name "$container" -e SERVICES=s3 -p 127.0.0.1::4566 localstack/localstack:4 > /dev/null
+port=$(docker port "$container" 4566/tcp | head -1 | sed 's/.*://')
+export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-east-1
+export S3_BUILD_CACHE_AWS_PARAMS="--endpoint-url http://127.0.0.1:$port"
+for _ in $(seq 120); do
+  curl -sf "http://127.0.0.1:$port/_localstack/health" > /dev/null && break
+  sleep 0.5
+done
+aws $S3_BUILD_CACHE_AWS_PARAMS s3 mb s3://aztec-ci-artifacts > /dev/null
+
+# A runner: in CI, no redis. CI_REDIS_AVAILABLE is set so source_redis never probes a host,
+# which on a developer machine can be a tunnel to the CI redis.
+export CI=1 CI_REDIS_AVAILABLE=0 LOG_PUBLISH_INTERVAL=1 GITHUB_TOKEN= DENOISE=1
+
+s3_log() { # <key> -> the log, or nothing if absent
+  aws $S3_BUILD_CACHE_AWS_PARAMS s3 cp "s3://aztec-ci-artifacts/logs/${1:0:4}/$1.log.gz" - 2>/dev/null | gunzip || true
+}
+
+# cache_log: published live while the producer runs, then finalized.
+key=1700000000000101
+(echo first; sleep 4; echo second) | PARENT_LOG_ID=1700000000000100 "$CI3/cache_log" "CI run" $key &
+pid=$!
+sleep 3
+grep -q "Completed: in-progress" <<<"$(s3_log $key)" || fail "cache_log publishes the log while it runs"
+wait $pid
+final=$(s3_log $key)
+grep -q "^first" <<<"$final" && grep -q "^second" <<<"$final" || fail "cache_log's final log has all output: $final"
+grep -q "Completed: in-progress" <<<"$final" && fail "cache_log's final log is finalized: $final"
+grep -q "1700000000000100" <<<"$final" || fail "cache_log's log links its parent"
+pass "cache_log publishes live and final logs to S3 without redis"
+
+# The final write is not overtaken by a live one still in flight.
+for i in 1 2 3 4 5; do
+  key=170000000000020$i
+  (for j in $(seq 50); do echo line $j; done) | "$CI3/cache_log" "CI run" $key
+  grep -q "Completed: in-progress" <<<"$(s3_log $key)" && fail "attempt $i: a live publish overwrote the final log"
+done
+pass "the final log is never overwritten by a live publish"
+
+# denoise: its log id is printed, and the log is in S3 by the time it returns.
+out=$("$CI3/denoise" "echo from-denoise; sleep 2")
+key=$(grep -o 'ci.aztec-labs.com/[0-9a-f-]*' <<<"$out" | head -1 | cut -d/ -f2)
+[ -n "$key" ] || fail "denoise prints its log link: $out"
+final=$(s3_log $key)
+grep -q "from-denoise" <<<"$final" || fail "denoise's final log is in S3: $final"
+grep -q "Status: 0" <<<"$final" || fail "denoise's final log has its status: $final"
+pass "denoise publishes its log to S3 without redis"
+
+# Outside CI with no redis, nothing is published.
+key=1700000000000301
+echo local | CI=0 "$CI3/cache_log" "local run" $key
+[ -z "$(s3_log $key)" ] || fail "cache_log publishes nothing outside CI without redis"
+pass "nothing is published outside CI without redis"

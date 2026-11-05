@@ -27,7 +27,7 @@ function finalize_log {
 }
 
 function publish_log {
-  cat $outfile | redis_setexz $key $CI_REDIS_EXPIRE
+  cat $outfile | log_publish $key $CI_REDIS_EXPIRE
 }
 
 function publish_log_final {
@@ -36,19 +36,26 @@ function publish_log_final {
   cat $outfile | CACHE_PERSIST_SYNC=1 cache_persistent $key $CI_REDIS_EXPIRE
 }
 
+# Publishes the log whenever it has changed, until $outfile.done appears. Stopped through that
+# file rather than killed, so a publish in flight finishes before the final one and cannot land
+# after it.
 function live_publish_log {
-  while [ -f $outfile ]; do
-    if [ $(( $(date +%s) - $(stat -c %Y "$outfile") )) -le 5 ]; then
+  local interval=$(log_publish_interval) last=
+  while [ ! -f $outfile.done ]; do
+    local mtime=$(stat -c %Y "$outfile")
+    if [ "$mtime" != "$last" ]; then
       publish_log
+      last=$mtime
     fi
-    for i in {1..5}; do
-      [ ! -f $outfile ] && break
+    for ((i = 0; i < interval; i++)); do
+      [ -f $outfile.done ] && break
       sleep 1
     done
   done
 }
 
-if [ "$CI_REDIS_AVAILABLE" -eq 1 ]; then
+if log_store_available; then
+  trap 'rm -f $outfile $outfile.done' EXIT
   log_str="$name log id: ${yellow}$DASHBOARD_URL/$key${reset}"
   echo_stderr -e "$log_str"
   # Close inherited pipeline FDs to prevent blocking parent pipelines.
@@ -59,6 +66,7 @@ if [ "$CI_REDIS_AVAILABLE" -eq 1 ]; then
     exec >/dev/null
   fi
   live_publish_log >&- 2>&- &
+  publish_pid=$!
   if [ "$dup" -eq 1 ]; then
     redact | tee -a $outfile
     # Print a second line if the log is long enough.
@@ -69,6 +77,8 @@ if [ "$CI_REDIS_AVAILABLE" -eq 1 ]; then
   else
     redact | cat >>$outfile
   fi
+  touch $outfile.done
+  wait $publish_pid
   publish_log_final
 else
   if [ "$dup" -eq 1 ]; then
