@@ -111,12 +111,12 @@ trap sig_handler SIGTERM SIGINT
 
 function publish_log {
   local expire=${1:-$CI_REDIS_EXPIRE}
-  cat $tmp_file 2>/dev/null | redis_setexz $log_key $expire
+  cat $tmp_file 2>/dev/null | log_publish $log_key $expire
 }
 
 function publish_log_final {
   local expire=${1:-$CI_REDIS_EXPIRE}
-  cat $tmp_file 2>/dev/null | cache_persistent $log_key $expire
+  cat $tmp_file 2>/dev/null | log_publish $log_key $expire final
 }
 
 # Finalize the current log and start a fresh one with a new unique key.

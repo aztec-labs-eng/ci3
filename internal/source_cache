@@ -57,53 +57,47 @@ function cache_disk_transfer_to {
       "mkdir -p /logs-disk/${subfolder} && cat > /logs-disk/${subfolder}/${key}.log.gz" &>/dev/null
 }
 
-# Persistent cache function that writes to both Redis and S3
-function cache_persistent {
-  local key="$1"
-  local expire="$2"
-  local tmpfile="/tmp/cache_log_$$_${key}.gz"
-
-  cat | gzip > "$tmpfile"
-
-  # Write to Redis (synchronous). Skipped when redis is unavailable: the noop
-  # redis_cli doesn't read stdin, so piping into it would SIGPIPE cat (141
-  # under pipefail). The S3 write below still runs, keeping the http log
-  # fallback working on keyless runners.
-  if [ "$CI_REDIS_AVAILABLE" -eq 1 ]; then
-    cat "$tmpfile" | redis_cli -x SETEX "$key" "$expire" &>/dev/null
-  fi
-
-  # Write to S3 in background, or in the foreground for a log that must outlive the caller:
-  # the build instance's top-level log is persisted as its last act, and a background upload
-  # is killed with the container before it lands.
-  if [ "${CACHE_PERSIST_SYNC:-0}" -eq 1 ]; then
-    cat "$tmpfile" | cache_s3_transfer "$key"
-    rm -f "$tmpfile"
-  else
-    {
-      cat "$tmpfile" | cache_s3_transfer "$key"
-      rm -f "$tmpfile"
-    } >&- 2>&- &
-  fi
-}
-
 # Whether logs reach the dashboard: through redis, or on a CI host without redis (a GitHub
 # runner) straight to S3, which the dashboard reads when redis misses.
 function log_store_available {
   [ "$CI_REDIS_AVAILABLE" -eq 1 ] || [ "${CI:-0}" -eq 1 ]
 }
 
-# Publish an in-progress log (stdin) where log_store_available found a store.
-# Usage: cat log | log_publish <key> <expire>
+# Publish a log (stdin) under <key>, rendered by the dashboard at /<key>.
+#   live:  to redis with a ttl of <expire>; on a CI host without redis, to S3.
+#   final: also the durable S3 copy the dashboard falls back to once redis expires it. Written in
+#          the background, unless LOG_PUBLISH_SYNC=1 (a log that must outlive its caller, such as
+#          an instance's top-level log) or redis is unavailable (the S3 copy is the only one).
+# With no store at all it just drains stdin.
+# Usage: cat log | log_publish <key> <expire> [final]
 function log_publish {
+  local key=$1 expire=$2 final=${3:-}
+  if ! log_store_available; then
+    cat >/dev/null
+    return 0
+  fi
+  local tmpfile=$(mktemp)
+  gzip > "$tmpfile"
   if [ "$CI_REDIS_AVAILABLE" -eq 1 ]; then
-    redis_setexz "$1" "$2"
+    redis_cli -x SETEX "$key" "$expire" < "$tmpfile" &>/dev/null
+    if [ "$final" != final ]; then
+      rm -f "$tmpfile"
+      return 0
+    fi
+  fi
+  # Bounded, so a stuck upload can't hold up a step that waits for it. A failed upload (say, a
+  # runner without AWS credentials) loses the log but never fails the caller.
+  if [ "$CI_REDIS_AVAILABLE" -eq 0 ] || [ "${LOG_PUBLISH_SYNC:-0}" -eq 1 ]; then
+    timeout 120 bash -c 'cache_s3_transfer "$0" < "$1"' "$key" "$tmpfile" || true
+    rm -f "$tmpfile"
   else
-    # Bounded, so a stuck upload can't hold up the end of the step that waits for it.
-    gzip | timeout 120 bash -c 'cache_s3_transfer "$0"' "$1"
+    {
+      timeout 120 bash -c 'cache_s3_transfer "$0" < "$1"' "$key" "$tmpfile" || true
+      rm -f "$tmpfile"
+    } >&- 2>&- &
   fi
 }
 
 # Export functions
-export -f cache_s3_transfer cache_s3_transfer_to cache_disk_transfer cache_disk_transfer_to cache_persistent \
+export -f cache_s3_transfer cache_s3_transfer_to cache_disk_transfer cache_disk_transfer_to \
   log_store_available log_publish
