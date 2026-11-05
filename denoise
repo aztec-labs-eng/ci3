@@ -40,7 +40,7 @@ function cleanup {
 }
 trap cleanup SIGINT SIGTERM
 # Remove file on exit, so we can publish even after SIGINT or SIGTERM.
-trap 'cleanup; rm -f $outfile $outfile.done $dots_fifo' EXIT
+trap 'cleanup; rm -f $outfile $dots_fifo' EXIT
 
 dots_per_line=${DENOISE_WIDTH:-64}
 dot_count=0
@@ -86,21 +86,12 @@ function publish_log_final {
   format_log_output | CACHE_PERSIST_SYNC=$sync cache_persistent $key $CI_REDIS_EXPIRE
 }
 
-# Publishes the log whenever it has changed, until $outfile.done appears. Stopped through that
-# file rather than killed, so a publish in flight finishes before the final one and cannot land
-# after it.
 function live_publish_log {
-  local interval=$(log_publish_interval) last=
-  while [ ! -f $outfile.done ]; do
-    local mtime=$(stat -c %Y "$outfile")
-    if [ "$mtime" != "$last" ]; then
+  while [ -f $outfile ]; do
+    if [ $(( $(date +%s) - $(stat -c %Y "$outfile") )) -le 5 ]; then
       publish_log
-      last=$mtime
     fi
-    for ((i = 0; i < interval; i++)); do
-      [ -f $outfile.done ] && break
-      sleep 1
-    done
+    sleep 5
   done
 }
 
@@ -140,11 +131,7 @@ wait $job_pid
 status=$?
 
 time="${SECONDS}s"
-if [ -n "${publish_pid:-}" ]; then
-  touch $outfile.done
-  wait $publish_pid
-  publish_pid=
-fi
+[ -n "${publish_pid:-}" ] && kill $publish_pid &>/dev/null || true
 publish_log_final
 
 # Kill tail (source), EOF propagates through fifo, dots loop drains and exits.
@@ -160,8 +147,8 @@ if [ "$status" -ne 0 ]; then
   if [ "$status" -eq 143 ] || [ "$status" -eq 130 ]; then
     echo -e ". ${yellow}interrupted${reset} ($time)"
   else
-    # Without redis there was no live log to watch (and outside CI none at all), so a
-    # failure dumps its output here too.
+    # Without redis the captured output was never published anywhere, so a
+    # failure must dump it here or it is lost entirely.
     if [ -t 1 ] || [ "${DUMP_FAIL:-0}" -eq 1 ] || [ "$CI_REDIS_AVAILABLE" -eq 0 ]; then
       echo -e "\nCommand exited with status $status. Dumping output:"
       cat $outfile
