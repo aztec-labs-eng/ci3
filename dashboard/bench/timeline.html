@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Memory Timeline</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@2.9.2/dist/Chart.min.js"></script>
+<style>
+  body {
+    margin: 0; padding: 20px;
+    background: #1a1a2e; color: #e0e0e0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+  }
+  h1 { font-size: 18px; margin-bottom: 4px; }
+  .subtitle { color: #888; font-size: 13px; margin-bottom: 16px; }
+  .subtitle a { color: #4a90e2; text-decoration: none; }
+  .subtitle a:hover { text-decoration: underline; }
+  .chart-wrap { position: relative; width: 100%; height: calc(100vh - 100px); }
+  canvas { background: #16213e; border-radius: 8px; }
+</style>
+</head>
+<body>
+<h1 id="title">Memory Timeline (Peak RSS)</h1>
+<div class="subtitle" id="subtitle">Loading...</div>
+<div class="chart-wrap"><canvas id="chart"></canvas></div>
+<script>
+  // Served by the CI dashboard at /bench/<org>/<repo>/<section>/timeline, which fills in the dashboard.
+  const dashboard = "__BENCH_DASHBOARD__";
+  const benchBase = "/bench/" + dashboard;
+  const params = new URLSearchParams(window.location.search);
+  const commitId = params.get("commit") || "";
+  const chartFilter = params.get("chart") || "";
+
+  if (!commitId) {
+    document.getElementById("subtitle").textContent = "No commit specified. Click a point on a stacked chart to view its timeline.";
+  } else {
+    fetch(benchBase + "/data.json").then(function(response) {
+      if (!response.ok) throw new Error("Failed to load data");
+      return response.json();
+    }).then(function(data) {
+      window.BENCHMARK_DATA = data;
+      // Find the commit entry
+      const entries = Object.values(window.BENCHMARK_DATA.entries)[0] || [];
+      const entry = entries.find(e => e.commit && e.commit.id === commitId);
+      if (!entry) {
+        document.getElementById("subtitle").textContent = "Commit " + commitId.slice(0, 7) + " not found in data.";
+        return;
+      }
+
+      // Find all benches belonging to the stacked chart group
+      const stages = [];
+      entry.benches.forEach(b => {
+        const extra = b.extra || "";
+        const match = extra.match(/^stacked:(.+)$/);
+        if (match && (!chartFilter || match[1] === chartFilter)) {
+          const label = b.name.split("/").pop();
+          stages.push({ label: label, value: b.value, unit: b.unit || "MB" });
+        }
+      });
+      // Sort by label (circuit index prefix ensures execution order)
+      stages.sort((a, b) => a.label.localeCompare(b.label));
+
+      if (stages.length === 0) {
+        document.getElementById("subtitle").textContent = "No stacked chart data found for commit " + commitId.slice(0, 7) + ".";
+        return;
+      }
+
+      const unit = stages[0].unit;
+      const values = stages.map(s => s.value);
+      const peakVal = Math.max(...values);
+      const peakIdx = values.indexOf(peakVal);
+      const commitMsg = entry.commit.message || "";
+
+      document.getElementById("title").textContent = commitId.slice(0, 7) + " Memory Timeline";
+      const subtitle = document.getElementById("subtitle");
+      subtitle.textContent = stages.length + " stages | Peak: " + peakVal + " " + unit +
+        " at " + stages[peakIdx].label + " | ";
+      const backLink = document.createElement("a");
+      backLink.href = benchBase;
+      backLink.textContent = "\u2190 Back to dashboard";
+      subtitle.appendChild(backLink);
+
+      const labels = stages.map(s => s.label.length > 55 ? s.label.slice(0, 52) + "..." : s.label);
+      const fullLabels = stages.map(s => s.label);
+      const pointColors = values.map(v => v === peakVal ? "#ff4444" : "#4a90e2");
+      const pointRadii = values.map(v => v === peakVal ? 6 : 2);
+      const deltas = values.map((v, i) => i === 0 ? 0 : +(v - values[i - 1]).toFixed(1));
+
+      new Chart(document.getElementById("chart"), {
+        type: "line",
+        data: {
+          labels: labels,
+          datasets: [{
+            label: "Peak RSS (" + unit + ")",
+            data: values,
+            borderColor: "#4a90e2",
+            backgroundColor: "rgba(74,144,226,0.15)",
+            borderWidth: 2,
+            fill: true,
+            steppedLine: "before",
+            pointBackgroundColor: pointColors,
+            pointRadius: pointRadii,
+            pointHoverRadius: 6,
+          }],
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          legend: { display: false },
+          scales: {
+            xAxes: [{
+              ticks: { fontColor: "#888", fontSize: 10, maxRotation: 90, minRotation: 45, autoSkip: true, maxTicksLimit: 40 },
+              gridLines: { color: "rgba(255,255,255,0.05)" },
+            }],
+            yAxes: [{
+              scaleLabel: { display: true, labelString: unit, fontColor: "#aaa" },
+              ticks: { fontColor: "#aaa", beginAtZero: true },
+              gridLines: { color: "rgba(255,255,255,0.08)" },
+            }],
+          },
+          tooltips: {
+            mode: "index",
+            intersect: false,
+            callbacks: {
+              title: function(items) { return fullLabels[items[0].index]; },
+              label: function(item) {
+                var d = deltas[item.index];
+                var ds = d > 0 ? " (+" + d + ")" : "";
+                return " " + item.value + " " + unit + ds;
+              },
+            },
+          },
+        },
+      });
+    }).catch(function() {
+      document.getElementById("subtitle").textContent = "Could not load benchmark data for " + dashboard;
+    });
+  }
+</script>
+</body>
+</html>

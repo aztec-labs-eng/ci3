@@ -1,8 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
-# Deploy a test instance of the dashboard on ports 8082/8083 via SSM.
-# Shares Redis and /logs-disk with the production instance.
+# Deploy a test instance of the dashboard on port 8082 via SSM.
+# Shares Redis with the production instance.
 # Requires: aws cli and SSM-enabled instance.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -60,7 +60,7 @@ docker rm -f rkapp-test 2>/dev/null || true
 # Pull env vars from the production container
 echo "Reading env vars from production container..."
 PROD_ENV=""
-for var in REDIS_HOST REDIS_PORT DASHBOARD_PASSWORD LOGS_DISK_PATH S3_LOGS_BUCKET S3_LOGS_PREFIX REPO_PATH; do
+for var in REDIS_HOST REDIS_PORT DASHBOARD_PASSWORD S3_LOGS_BUCKET S3_LOGS_PREFIX REPO_PATH; do
   val=$(docker exec rkapp printenv "$var" 2>/dev/null) || true
   if [ -n "$val" ]; then
     PROD_ENV="$PROD_ENV -e $var=$val"
@@ -70,9 +70,7 @@ done
 echo "Starting new container..."
 eval docker run -d --name rkapp-test --restart unless-stopped \
   --network host \
-  -e CI_METRICS_PORT=8083 \
   $PROD_ENV \
-  -v /logs-disk:/logs-disk \
   rkapp-test \
   gunicorn -w 4 -b 0.0.0.0:8082 rk:app
 
