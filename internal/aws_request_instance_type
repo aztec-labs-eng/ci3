@@ -122,6 +122,22 @@ iid=""
 instance_type=""
 lifecycle=""
 
+# The fleets' allocation strategies, which a repository may set. Spot: capacity-optimized-prioritized (the default)
+# favours the pools with the most spare capacity and treats the pools' priorities as a tiebreak; the others EC2 offers
+# (price-capacity-optimized, capacity-optimized, lowest-price, diversified) ignore the priorities. EC2 has no spot
+# strategy that honours the priorities strictly. On-demand: lowest-price (the default), or prioritized, which takes
+# the highest-priority pool that has capacity.
+spot_strategy=${CI_SPOT_ALLOCATION_STRATEGY:-capacity-optimized-prioritized}
+ondemand_strategy=${CI_ONDEMAND_ALLOCATION_STRATEGY:-lowest-price}
+case "$spot_strategy" in
+  capacity-optimized-prioritized | price-capacity-optimized | capacity-optimized | lowest-price | diversified) ;;
+  *) echo "CI_SPOT_ALLOCATION_STRATEGY: not a spot allocation strategy: $spot_strategy" >&2; exit 1 ;;
+esac
+case "$ondemand_strategy" in
+  lowest-price | prioritized) ;;
+  *) echo "CI_ONDEMAND_ALLOCATION_STRATEGY: not an on-demand allocation strategy: $ondemand_strategy" >&2; exit 1 ;;
+esac
+
 # Try spot first, retrying the whole diversified fleet until the time budget
 # expires (preserves the historical "give spot ~1 min, then on-demand" pattern).
 if [ "${NO_SPOT:-0}" -ne 1 ]; then
@@ -129,11 +145,11 @@ if [ "${NO_SPOT:-0}" -ne 1 ]; then
   spot_poll=${CI_SPOT_POLL:-10}
   SECONDS=0
   while true; do
-    echo "Requesting spot fleet $info (capacity-optimized-prioritized, ${spot_timeout}s budget)..."
+    echo "Requesting spot fleet $info ($spot_strategy, ${spot_timeout}s budget)..."
     resp=$(aws ec2 create-fleet \
       --type instant \
       --target-capacity-specification "TotalTargetCapacity=1,DefaultTargetCapacityType=spot" \
-      --spot-options "AllocationStrategy=capacity-optimized-prioritized" \
+      --spot-options "AllocationStrategy=$spot_strategy" \
       --launch-template-configs "$ltc" \
       --output json 2>"$state_dir/fleet_err") || true
     iid=$(echo "$resp" | jq -r '.Instances[0].InstanceIds[0] // empty' 2>/dev/null || true)
@@ -150,7 +166,7 @@ if [ "${NO_SPOT:-0}" -ne 1 ]; then
   done
 fi
 
-# On-demand fallback (cheapest pool) only if spot couldn't be had. Some pinned pools (e.g.
+# On-demand fallback (the cheapest pool, or by priority) only if spot couldn't be had. Some pinned pools (e.g.
 # m6a.metal for benchmarks) can hit InsufficientInstanceCapacity even on-demand, so retry
 # the whole request until a time budget expires rather than giving up on the first miss.
 if [ -z "$iid" ]; then
@@ -158,11 +174,11 @@ if [ -z "$iid" ]; then
   ondemand_poll=${CI_ONDEMAND_POLL:-20}
   SECONDS=0
   while true; do
-    echo "Requesting on-demand fleet $info..."
+    echo "Requesting on-demand fleet $info ($ondemand_strategy)..."
     resp=$(aws ec2 create-fleet \
       --type instant \
       --target-capacity-specification "TotalTargetCapacity=1,DefaultTargetCapacityType=on-demand" \
-      --on-demand-options "AllocationStrategy=lowest-price" \
+      --on-demand-options "AllocationStrategy=$ondemand_strategy" \
       --launch-template-configs "$ltc" \
       --output json 2>"$state_dir/fleet_err") || true
     iid=$(echo "$resp" | jq -r '.Instances[0].InstanceIds[0] // empty' 2>/dev/null || true)

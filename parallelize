@@ -8,9 +8,10 @@ NO_CD=1 source $(dirname "${BASH_SOURCE[0]}")/source
 cd $root
 
 if [ -z "${1:-}" ]; then
-  # A job per physical core: half the vCPUs with SMT, all of them without.
-  num_cpus=$(get_num_cpus)
-  jobs=$((num_cpus / $(get_threads_per_core)))
+  # A job per CPU this process may use (its cgroup's quota, else every online CPU). PARALLELIZE_PHYSICAL_CORES=1 asks
+  # for a job per physical core instead: half of them with SMT.
+  jobs=$(get_num_cpus)
+  [ "${PARALLELIZE_PHYSICAL_CORES:-0}" -eq 1 ] && jobs=$((jobs / $(get_threads_per_core)))
 else
   jobs=$(get_num_cpus_max ${1:-})
 fi
