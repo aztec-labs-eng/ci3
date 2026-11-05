@@ -104,11 +104,6 @@ function log_publish {
   fi
 }
 
-# Seconds between live publishes of a log while it changes.
-function log_publish_interval {
-  echo ${LOG_PUBLISH_INTERVAL:-5}
-}
-
 # Export functions
 export -f cache_s3_transfer cache_s3_transfer_to cache_disk_transfer cache_disk_transfer_to cache_persistent \
-  log_store_available log_publish log_publish_interval
+  log_store_available log_publish
