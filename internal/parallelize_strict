@@ -8,9 +8,10 @@ cd $root
 if [ -n "${BENCH_CPU_COUNT:-}" ]; then
   num_cpus=$BENCH_CPU_COUNT
 elif [ -z "${1:-}" ]; then
-  # A slot per physical core: half the vCPUs with SMT, all of them without.
+  # A slot per CPU this process may use (its cgroup's quota, else every online CPU). PARALLELIZE_PHYSICAL_CORES=1 asks
+  # for a slot per physical core instead: half of them with SMT.
   num_cpus=$(get_num_cpus)
-  num_cpus=$((num_cpus / $(get_threads_per_core)))
+  [ "${PARALLELIZE_PHYSICAL_CORES:-0}" -eq 1 ] && num_cpus=$((num_cpus / $(get_threads_per_core)))
 else
   num_cpus=$(get_num_cpus_max ${1:-})
 fi
