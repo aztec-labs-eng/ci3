@@ -57,7 +57,7 @@ fi
 # Allow override.
 cores=${CPUS:-$cores}
 
-# Appends this instance's record to CI3_INSTANCE_LOG, once. GitHub cannot see the instance.
+# Appends this instance's record to CI3_INSTANCE_LOG, once.
 function report_instance {
   local evicted=$1
   [ -n "${CI3_INSTANCE_LOG:-}" ] && [ -n "${iid:-}" ] && [ -z "${instance_reported:-}" ] || return 0
