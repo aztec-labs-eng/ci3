@@ -96,6 +96,12 @@ function github_repo_url {
   echo "https://github.com/$(github_repo)"
 }
 
+# Context prefix of a job's per-command commit statuses: ci/<job_id>/, for the given job or this one.
+# clear_github_failure_statuses clears the failures under it once the job passes.
+function github_status_context_prefix {
+  echo "ci/${1:-${JOB_ID:-bootstrap}}/"
+}
+
 function pr_link {
   local line=$1
   if [[ $line =~ \(#([0-9]+)\) ]]; then
@@ -107,4 +113,4 @@ function pr_link {
   fi
 }
 
-export -f hash_str hash_str_orig echo_stderr uuid get_num_cpus get_num_cpus_max get_threads_per_core urlencode term_link ci_term_link pr_link
+export -f hash_str hash_str_orig echo_stderr uuid get_num_cpus get_num_cpus_max get_threads_per_core urlencode term_link ci_term_link pr_link github_status_context_prefix
