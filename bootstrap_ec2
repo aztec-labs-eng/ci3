@@ -60,12 +60,13 @@ cores=${CPUS:-$cores}
 # Appends this instance's record to CI3_INSTANCE_LOG, once.
 function report_instance {
   local evicted=$1
-  [ -n "${CI3_INSTANCE_LOG:-}" ] && [ -n "${iid:-}" ] && [ -z "${instance_reported:-}" ] || return 0
+  # From state_dir: provisioning can fail after the launch, before bootstrap_ec2 reads these.
+  [ -n "${CI3_INSTANCE_LOG:-}" ] && [ -s "${state_dir:-}/iid" ] && [ -z "${instance_reported:-}" ] || return 0
   instance_reported=1
   jq -c -n \
-    --arg id "$iid" \
-    --arg type "${EC2_INSTANCE_TYPE:-unknown}" \
-    --arg lifecycle "${EC2_SPOT:-unknown}" \
+    --arg id "$(tr -d '[:space:]' <"$state_dir/iid")" \
+    --arg type "$(cat "$state_dir/instance_type" 2>/dev/null || echo unknown)" \
+    --arg lifecycle "$(cat "$state_dir/spot" 2>/dev/null || echo unknown)" \
     --argjson requested_at "$requested_at" \
     --argjson ended_at "$(date +%s)" \
     --argjson evicted "$evicted" \
