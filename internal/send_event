@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Sends one event, given as key=value arguments, as a log record to the OTLP collector. Does nothing
-# unless CI3_EVENT_TOKEN and CI3_EVENT_PROJECT are set. Never fails its caller.
+# unless CI3_EVENT_ENDPOINT, CI3_EVENT_TOKEN and CI3_EVENT_PROJECT are set. Never fails its caller.
 NO_CD=1 source $(dirname "${BASH_SOURCE[0]}")/../source
 
-[ -n "${CI3_EVENT_TOKEN:-}" ] && [ -n "${CI3_EVENT_PROJECT:-}" ] || exit 0
+[ -n "${CI3_EVENT_ENDPOINT:-}" ] && [ -n "${CI3_EVENT_TOKEN:-}" ] && [ -n "${CI3_EVENT_PROJECT:-}" ] || exit 0
 
 payload=$(jq -c -n \
   --arg project "$CI3_EVENT_PROJECT" \
@@ -21,6 +21,6 @@ payload=$(jq -c -n \
 
 curl -fsS -o /dev/null --max-time 5 \
   -H "Content-Type: application/json" -H "Authorization: Bearer $CI3_EVENT_TOKEN" \
-  --data "$payload" "${CI3_EVENT_ENDPOINT:-https://otel.aztec-labs.com}/v1/logs" ||
+  --data "$payload" "$CI3_EVENT_ENDPOINT/v1/logs" ||
   echo_stderr "send_event: not sent."
 exit 0
