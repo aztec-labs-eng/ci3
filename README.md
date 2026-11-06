@@ -121,7 +121,7 @@ The dependency runs both ways. ci3 reads these from the repository it is buildin
 - `.test_patterns.yml` — test skips, retries, owners and Slack notifications (`filter_test_cmds`, `run_test_cmd`).
 - `scripts/process_flake_log.py` — optional; run by `parallelize` after a test run when present.
 - `build-images/src/home/.gitconfig` — mounted into containers by `docker_isolate`.
-- `CI3_INSTANCE_LOG` — optional; when set, `bootstrap_ec2` appends one JSON line per build instance to this file: `id`, `type`, `lifecycle`, `requested_at`, `ended_at` and `evicted`.
+- `CI_OTEL_TOKEN` and `CI_OTEL_PROJECT` — optional; when both are set, `bootstrap_ec2` sends one `ci.instance` record per build instance to the OTLP collector. `CI_OTEL_ENDPOINT` overrides `https://otel.aztec-labs.com`. The token stays on the host that runs `bootstrap_ec2`.
 
 ### State shared between versions
 
