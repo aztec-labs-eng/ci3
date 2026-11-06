@@ -57,11 +57,44 @@ fi
 # Allow override.
 cores=${CPUS:-$cores}
 
+# Sends this run's ci.instance record once, through otel_log: the instance GitHub cannot see.
+function report_instance {
+  local code=$1 evicted=$2
+  [ -n "${iid:-}" ] && [ -z "${instance_reported:-}" ] || return 0
+  instance_reported=1
+  local ended_at=$(date +%s)
+  otel_log "$(jq -c -n \
+    --arg repo "$github_repository" \
+    --arg run_id "${GITHUB_RUN_ID:-}" \
+    --arg run_attempt "${GITHUB_RUN_ATTEMPT:-}" \
+    --arg job "$status_job_id" \
+    --arg ref_name "$REF_NAME" \
+    --arg ci_log_id "$CI_LOG_ID" \
+    --arg instance_id "$iid" \
+    --arg instance_type "${EC2_INSTANCE_TYPE:-unknown}" \
+    --arg lifecycle "${EC2_SPOT:-unknown}" \
+    --arg arch "$arch" \
+    --argjson requested_at "$requested_at" \
+    --argjson ready_at "$ready_at" \
+    --argjson ended_at "$ended_at" \
+    --argjson exit_code "$code" \
+    --argjson evicted "$evicted" \
+    '{event: "ci.instance", repo: $repo,
+      run_id: ($run_id | tonumber? // null), run_attempt: ($run_attempt | tonumber? // null),
+      job: $job, ref_name: $ref_name, ci_log_id: $ci_log_id,
+      instance_id: $instance_id, instance_type: $instance_type, lifecycle: $lifecycle, arch: $arch,
+      requested_at: ($requested_at | todate), ready_at: ($ready_at | todate), ended_at: ($ended_at | todate),
+      setup_s: ($ready_at - $requested_at), instance_s: ($ended_at - $requested_at),
+      exit_code: $exit_code, evicted: $evicted}')" || true
+}
+
 # Trap function to terminate our running instance when the script exits.
 function cleanup {
+  local code=$?
   if [ -d "${state_dir:-}" ]; then
     aws_terminate_instance "$state_dir" >/dev/null 2>&1
   fi
+  report_instance "$code" false
 }
 # It's important that cleanup writes to /dev/null.
 # We run this from parallel, which closes stdout/stderr during its cleanup.
@@ -123,12 +156,14 @@ if [ -n "$existing_instance" ]; then
 fi
 
 # Request new instance.
+requested_at=$(date +%s)
 # SSH mode needs a key pair; SSM mode uses instance profile (no key pair).
 if [ "$use_ssh" -eq 1 ]; then
   KEY_NAME=$key_name aws_request_instance "$instance_name" "$cores" "$arch" "$state_dir"
 else
   KEY_NAME= aws_request_instance "$instance_name" "$cores" "$arch" "$state_dir"
 fi
+ready_at=$(date +%s)
 ip=$(cat "$state_dir/ip")
 sir=""
 if [[ -f "$state_dir/sir" ]]; then
@@ -494,6 +529,8 @@ fi
 # If we were spot evicted, try again using on-demand.
 if [ "$exit_code" -eq 155 ]; then
   echo "Spot was evicted. Retrying with on-demand instance."
+  # exec skips the EXIT trap, and the evicted instance needs no termination.
+  report_instance 155 true
   NO_SPOT=1 exec "$0" "$@"
 else
   # Print CI log URL at the end for easy access (avoid scrolling up).
