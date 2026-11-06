@@ -70,6 +70,7 @@ function report_instance {
     --arg ci_log_id "${CI_LOG_ID:-}" \
     --arg run_id "${GITHUB_RUN_ID:-}" \
     --arg run_attempt "${GITHUB_RUN_ATTEMPT:-}" \
+    --arg pr_number "${PR_NUMBER:-}" \
     --arg id "$(tr -d '[:space:]' <"$state_dir/iid")" \
     --arg type "$(cat "$state_dir/instance_type" 2>/dev/null || echo unknown)" \
     --arg lifecycle "$(cat "$state_dir/spot" 2>/dev/null || echo unknown)" \
@@ -78,6 +79,7 @@ function report_instance {
     --argjson evicted "$evicted" \
     '{event: "ci.instance", repo: $repo, ci_log_id: $ci_log_id,
       run_id: ($run_id | tonumber? // null), run_attempt: ($run_attempt | tonumber? // null),
+      pr_number: ($pr_number | tonumber? // null),
       instance_id: $id, instance_type: $type, lifecycle: $lifecycle,
       requested_at: ($requested_at | todate), ended_at: ($ended_at | todate),
       instance_s: ($ended_at - $requested_at), evicted: $evicted}') || return 0
