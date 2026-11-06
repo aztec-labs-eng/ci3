@@ -19,7 +19,7 @@ payload=$(jq -c -n \
        ($ARGS.positional | map(capture("^(?<key>[^=]+)=(?<value>.*)$"; "s")) | from_entries | tojson)}}]}]}]}' \
   --args "$@") || exit 0
 
-curl -fsS -o /dev/null --max-time 5 --retry 1 \
+curl -fsS -o /dev/null --max-time 5 \
   -H "Content-Type: application/json" -H "Authorization: Bearer $CI_OTEL_TOKEN" \
   --data "$payload" "${CI_OTEL_ENDPOINT:-https://otel.aztec-labs.com}/v1/logs" ||
   echo_stderr "send_event: not sent."

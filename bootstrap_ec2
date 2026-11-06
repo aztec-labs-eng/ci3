@@ -57,7 +57,7 @@ fi
 # Allow override.
 cores=${CPUS:-$cores}
 
-# In the background: a slow collector must not delay the termination.
+# In the background and detached from the output pipes: a slow collector must not delay anything.
 function report_instance {
   [ -n "${CI_OTEL_TOKEN:-}" ] && [ -n "${CI_OTEL_PROJECT:-}" ] || return 0
   # From state_dir: provisioning can fail after the launch, before bootstrap_ec2 reads these.
@@ -72,8 +72,7 @@ function report_instance {
     instance_type="$(cat "$state_dir/instance_type" 2>/dev/null || echo unknown)" \
     lifecycle="$(cat "$state_dir/spot" 2>/dev/null || echo unknown)" \
     instance_s=$(($(date +%s) - requested_at)) \
-    evicted="$1" &
-  report_pid=$!
+    evicted="$1" >/dev/null 2>&1 &
 }
 
 # Trap function to terminate our running instance when the script exits.
@@ -83,7 +82,6 @@ function cleanup {
   if [ -d "${state_dir:-}" ]; then
     aws_terminate_instance "$state_dir" >/dev/null 2>&1
   fi
-  wait "${report_pid:-}" 2>/dev/null || true
 }
 # It's important that cleanup writes to /dev/null.
 # We run this from parallel, which closes stdout/stderr during its cleanup.
