@@ -3,9 +3,8 @@
 #
 # A failing test or command posts its own commit status, ci/<job_id>/<test_cmd> or
 # ci/<job_id>/<denoise command line>, and only that job ever posts under that context. Once the
-# job passes on the same commit, for example after a rerun or a retried flake, those failures
-# are stale but GitHub keeps showing them. Call this when the job succeeds to overwrite them
-# with success.
+# job passes on the same commit, for example after a rerun, those failures are stale but GitHub
+# keeps showing them. Call this when the job succeeds to overwrite them with success.
 #
 # Only contexts under this job's ci/<job_id>/ prefix are touched, so failures from other jobs
 # on the same commit (e.g. the arm64 build) stay visible, even of the same test. The job's own
@@ -29,7 +28,7 @@ sha="${COMMIT_HASH:-}"
 api="https://api.github.com/repos/${repo}"
 curl_args=(-sf --max-time 20 -H "Authorization: token $token" -H "Accept: application/vnd.github+json")
 prefix="ci/${job_id}/"
-description="passed in a later run"
+description="job passed"
 
 # The combined status endpoint returns the latest status per context, 100 per page.
 contexts=()
