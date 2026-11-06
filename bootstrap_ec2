@@ -61,6 +61,8 @@ cores=${CPUS:-$cores}
 # not delay the termination.
 function report_instance {
   local evicted=$1
+  # Off unless the repository sets both.
+  [ -n "${CI_OTEL_TOKEN:-}" ] && [ -n "${CI_OTEL_PROJECT:-}" ] || return 0
   # From state_dir: provisioning can fail after the launch, before bootstrap_ec2 reads these.
   [ -s "${state_dir:-}/iid" ] && [ -z "${instance_reported:-}" ] || return 0
   instance_reported=1
