@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # Mark a job's leftover per-command failure statuses on the commit as passed.
 #
-# A failing test or command posts its own commit status (ci/<test_cmd>, or the denoise
-# command line) and nothing else ever posts under that context. Once the job passes on the
-# same commit, for example after a rerun or a retried flake, those failures are stale but
-# GitHub keeps showing them. Call this when the job succeeds to overwrite them with success.
+# A failing test or command posts its own commit status, ci/<job_id>/<test_cmd> or
+# ci/<job_id>/<denoise command line>, and only that job ever posts under that context. Once the
+# job passes on the same commit, for example after a rerun or a retried flake, those failures
+# are stale but GitHub keeps showing them. Call this when the job succeeds to overwrite them
+# with success.
 #
-# Only statuses whose description carries this job's "[<job_id>] " tag are touched, so
-# failures from other jobs on the same commit (e.g. the arm64 build) stay visible. The job's
-# own top-level ci/<job_id> status is left to the caller.
+# Only contexts under this job's ci/<job_id>/ prefix are touched, so failures from other jobs
+# on the same commit (e.g. the arm64 build) stay visible, even of the same test. The job's own
+# top-level ci/<job_id> status is left to the caller.
 #
 # Usage: clear_github_failure_statuses <job_id> <target_url>
 #
@@ -27,9 +28,8 @@ sha="${COMMIT_HASH:-}"
 
 api="https://api.github.com/repos/${repo}"
 curl_args=(-sf --max-time 20 -H "Authorization: token $token" -H "Accept: application/vnd.github+json")
-tag="[${job_id}] "
-description="${tag}passed in a later run"
-description="${description:0:140}"
+prefix="ci/${job_id}/"
+description="passed in a later run"
 
 # The combined status endpoint returns the latest status per context, 100 per page.
 contexts=()
@@ -37,8 +37,8 @@ for page in $(seq 1 10); do
   response=$(curl "${curl_args[@]}" "${api}/commits/${sha}/status?per_page=100&page=${page}") || break
   while IFS= read -r context; do
     [ -n "$context" ] && contexts+=("$context")
-  done < <(echo "$response" | jq -r --arg tag "$tag" --arg own "ci/${job_id}" '
-    .statuses[] | select(.state == "failure" and .context != $own and ((.description // "") | startswith($tag))) | .context')
+  done < <(echo "$response" | jq -r --arg prefix "$prefix" '
+    .statuses[] | select(.state == "failure" and (.context | startswith($prefix))) | .context')
   [ "$(echo "$response" | jq '.statuses | length')" -lt 100 ] && break
 done
 
