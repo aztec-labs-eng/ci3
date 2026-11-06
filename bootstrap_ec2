@@ -57,30 +57,22 @@ fi
 # Allow override.
 cores=${CPUS:-$cores}
 
-# Sends this instance's record to the OTLP collector, once, in the background: a slow collector must
-# not delay the termination.
+# In the background: a slow collector must not delay the termination.
 function report_instance {
-  local evicted=$1
-  # Off unless the repository sets both.
   [ -n "${CI_OTEL_TOKEN:-}" ] && [ -n "${CI_OTEL_PROJECT:-}" ] || return 0
   # From state_dir: provisioning can fail after the launch, before bootstrap_ec2 reads these.
   [ -s "${state_dir:-}/iid" ] && [ -z "${instance_reported:-}" ] || return 0
   instance_reported=1
-  local ended_at=$(date +%s)
   send_event \
     event=ci.instance \
-    repo="$github_repository" \
     ci_log_id="${CI_LOG_ID:-}" \
     run_id="${GITHUB_RUN_ID:-}" \
-    run_attempt="${GITHUB_RUN_ATTEMPT:-}" \
     pr_number="${PR_NUMBER:-}" \
     instance_id="$(tr -d '[:space:]' <"$state_dir/iid")" \
     instance_type="$(cat "$state_dir/instance_type" 2>/dev/null || echo unknown)" \
     lifecycle="$(cat "$state_dir/spot" 2>/dev/null || echo unknown)" \
-    requested_at="$(date -u -d "@$requested_at" +%FT%TZ)" \
-    ended_at="$(date -u -d "@$ended_at" +%FT%TZ)" \
-    instance_s=$((ended_at - requested_at)) \
-    evicted="$evicted" &
+    instance_s=$(($(date +%s) - requested_at)) \
+    evicted="$1" &
   report_pid=$!
 }
 
@@ -527,7 +519,6 @@ if [ "$exit_code" -eq 155 ]; then
   echo "Spot was evicted. Retrying with on-demand instance."
   # exec skips the EXIT trap, and the evicted instance needs no termination.
   report_instance true
-  wait "${report_pid:-}" 2>/dev/null || true
   NO_SPOT=1 exec "$0" "$@"
 else
   # Print CI log URL at the end for easy access (avoid scrolling up).
