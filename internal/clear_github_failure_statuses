@@ -33,6 +33,9 @@ prefix=$(github_status_context_prefix "$job_id")
 description="job passed"
 
 # The combined status endpoint returns the latest status per context, 100 per page.
+# Best effort: reads at most 1,000 contexts and stops on a failed read. Anything left over stays
+# red, as it did before this clear existed. Reaching the cap takes a mass failure under
+# no-fail-fast and then a passing re-run of the same commit.
 contexts=()
 for page in $(seq 1 10); do
   response=$(curl "${curl_args[@]}" "${api}/commits/${sha}/status?per_page=100&page=${page}") || break
