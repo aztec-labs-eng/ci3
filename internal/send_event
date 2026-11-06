@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Sends one event, given as key=value arguments, as an OTLP/HTTP log record whose body is the event
+# as JSON. An empty value leaves its key out, and true, false and short integers become JSON values.
+# Sends nothing unless CI_OTEL_TOKEN and CI_OTEL_PROJECT are set. Never fails its caller: a CI run
+# must not fail because an event could not be sent.
+#
+#   send_event event=ci.instance instance_s=42 evicted=false
+#
+# CI_OTEL_ENDPOINT defaults to https://otel.aztec-labs.com. The records share one stream per
+# repository, under service.name=ci3.
+NO_CD=1 source $(dirname "${BASH_SOURCE[0]}")/../source
+
+[ -n "${CI_OTEL_TOKEN:-}" ] && [ -n "${CI_OTEL_PROJECT:-}" ] || exit 0
+endpoint=${CI_OTEL_ENDPOINT:-https://otel.aztec-labs.com}
+
+for kv in "$@"; do
+  if [[ ! "$kv" =~ ^[^=]+= ]]; then
+    echo_stderr "send_event: '$kv' is not key=value, nothing sent."
+    exit 0
+  fi
+done
+
+# Longer digit runs are IDs, which stay strings.
+if ! record=$(jq -c -n '
+  reduce ($ARGS.positional[] | capture("^(?<k>[^=]+)=(?<v>.*)$"; "s")) as $kv ({};
+    if $kv.v == "" then .
+    else .[$kv.k] = (
+      if $kv.v == "true" then true
+      elif $kv.v == "false" then false
+      elif ($kv.v | test("^-?[0-9]{1,15}$")) then ($kv.v | tonumber)
+      else $kv.v end)
+    end)' --args "$@" 2>&1) ||
+  ! payload=$(jq -c -n \
+    --arg record "$record" \
+    --arg project "$CI_OTEL_PROJECT" \
+    --arg repo "$(github_repo)" \
+    --arg time "$(date +%s%N)" \
+    '{resourceLogs: [{
+       resource: {attributes: [
+         {key: "project", value: {stringValue: $project}},
+         {key: "service.name", value: {stringValue: "ci3"}},
+         {key: "deployment.environment.name", value: {stringValue: "ci"}},
+         {key: "vcs.repository.name", value: {stringValue: $repo}}]},
+       scopeLogs: [{scope: {name: "ci3"}, logRecords: [{
+         timeUnixNano: $time, severityNumber: 9, severityText: "INFO",
+         body: {stringValue: $record}}]}]}]}' 2>&1); then
+  echo_stderr "send_event: could not build the record, nothing sent."
+  exit 0
+fi
+
+status=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 --retry 1 \
+  -H "Content-Type: application/json" -H "Authorization: Bearer $CI_OTEL_TOKEN" \
+  --data "$payload" "${endpoint%/}/v1/logs" 2>&1) || true
+if [[ "$status" != 2?? ]]; then
+  echo_stderr "send_event: ${endpoint%/}/v1/logs answered $status, record not sent."
+fi
+exit 0
