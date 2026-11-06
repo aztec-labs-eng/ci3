@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Sends one event, given as key=value arguments, as a log record to the OTLP collector. Does nothing
-# unless CI_OTEL_TOKEN and CI_OTEL_PROJECT are set. Never fails its caller.
+# unless CI3_EVENT_TOKEN and CI3_EVENT_PROJECT are set. Never fails its caller.
 NO_CD=1 source $(dirname "${BASH_SOURCE[0]}")/../source
 
-[ -n "${CI_OTEL_TOKEN:-}" ] && [ -n "${CI_OTEL_PROJECT:-}" ] || exit 0
+[ -n "${CI3_EVENT_TOKEN:-}" ] && [ -n "${CI3_EVENT_PROJECT:-}" ] || exit 0
 
 payload=$(jq -c -n \
-  --arg project "$CI_OTEL_PROJECT" \
+  --arg project "$CI3_EVENT_PROJECT" \
   --arg repo "$(github_repo)" \
   --arg time "$(date +%s%N)" \
   '{resourceLogs: [{
@@ -20,7 +20,7 @@ payload=$(jq -c -n \
   --args "$@") || exit 0
 
 curl -fsS -o /dev/null --max-time 5 \
-  -H "Content-Type: application/json" -H "Authorization: Bearer $CI_OTEL_TOKEN" \
-  --data "$payload" "${CI_OTEL_ENDPOINT:-https://otel.aztec-labs.com}/v1/logs" ||
+  -H "Content-Type: application/json" -H "Authorization: Bearer $CI3_EVENT_TOKEN" \
+  --data "$payload" "${CI3_EVENT_ENDPOINT:-https://otel.aztec-labs.com}/v1/logs" ||
   echo_stderr "send_event: not sent."
 exit 0

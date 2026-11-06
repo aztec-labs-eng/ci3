@@ -59,7 +59,7 @@ cores=${CPUS:-$cores}
 
 # In the background and detached from the output pipes: a slow collector must not delay anything.
 function report_instance {
-  [ -n "${CI_OTEL_TOKEN:-}" ] && [ -n "${CI_OTEL_PROJECT:-}" ] || return 0
+  [ -n "${CI3_EVENT_TOKEN:-}" ] && [ -n "${CI3_EVENT_PROJECT:-}" ] || return 0
   # From state_dir: provisioning can fail after the launch, before bootstrap_ec2 reads these.
   [ -s "${state_dir:-}/iid" ] && [ -z "${instance_reported:-}" ] || return 0
   instance_reported=1
