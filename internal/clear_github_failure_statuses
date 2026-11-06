@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Mark a job's leftover per-command failure statuses on the commit as passed.
+#
+# A failing test or command posts its own commit status, ci/<job_id>/<test_cmd> or
+# ci/<job_id>/<denoise command line>, and only that job ever posts under that context. Once the
+# job passes on the same commit, for example after a rerun, those failures are stale but GitHub
+# keeps showing them. Call this when the job succeeds to overwrite them with success.
+#
+# Only contexts under this job's ci/<job_id>/ prefix are touched, so failures from other jobs
+# on the same commit (e.g. the arm64 build) stay visible, even of the same test. The job's own
+# top-level ci/<job_id> status is left to the caller.
+#
+# Usage: clear_github_failure_statuses <job_id> <target_url>
+#
+# Environment: same as post_github_status (CI, GITHUB_TOKEN, GITHUB_REPOSITORY, COMMIT_HASH).
+set -euo pipefail
+
+[ "${CI:-0}" != "1" ] && exit 0
+
+source "$(dirname "${BASH_SOURCE[0]}")/source_stdlib"
+
+job_id=${1:?usage: clear_github_failure_statuses <job_id> <target_url>}
+target_url=${2:?usage: clear_github_failure_statuses <job_id> <target_url>}
+
+token="${GITHUB_TOKEN:-}"
+repo="${GITHUB_REPOSITORY:-}"
+sha="${COMMIT_HASH:-}"
+[[ -z "$token" || -z "$repo" || -z "$sha" ]] && exit 0
+
+api="https://api.github.com/repos/${repo}"
+curl_args=(-sf --max-time 20 -H "Authorization: token $token" -H "Accept: application/vnd.github+json")
+prefix=$(github_status_context_prefix "$job_id")
+description="job passed"
+
+# The combined status endpoint returns the latest status per context, 100 per page.
+# Best effort: reads at most 1,000 contexts and stops on a failed read. Anything left over stays
+# red, as it did before this clear existed. Reaching the cap takes a mass failure under
+# no-fail-fast and then a passing re-run of the same commit.
+contexts=()
+for page in $(seq 1 10); do
+  response=$(curl "${curl_args[@]}" "${api}/commits/${sha}/status?per_page=100&page=${page}") || break
+  while IFS= read -r context; do
+    [ -n "$context" ] && contexts+=("$context")
+  done < <(echo "$response" | jq -r --arg prefix "$prefix" '
+    .statuses[] | select(.state == "failure" and (.context | startswith($prefix))) | .context')
+  [ "$(echo "$response" | jq '.statuses | length')" -lt 100 ] && break
+done
+
+for context in "${contexts[@]}"; do
+  post_github_status success "$context" "$target_url" "$description" || true
+done

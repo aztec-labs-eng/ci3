@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# Tests for internal/clear_github_failure_statuses against a fake GitHub API (a curl stub on PATH):
+# - the job's own ci/<job_id>/ failures are overwritten with success
+# - other jobs' failures, unprefixed failures, non-failures and the job's own top-level status are left alone
+# - statuses beyond the first page of the combined status are reached
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT="$SCRIPT_DIR/../internal/clear_github_failure_statuses"
+
+RED=$'\033[0;31m'
+GREEN=$'\033[0;32m'
+NC=$'\033[0m'
+
+TESTS_PASSED=0
+TESTS_FAILED=0
+
+pass() { echo "${GREEN}✓${NC} $1"; ((TESTS_PASSED++)) || true; }
+fail() {
+  echo "${RED}✗${NC} $1: $2"
+  ((TESTS_FAILED++)) || true
+}
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+# The stub serves $tmp/page<N>.json for status reads and appends each posted body to $tmp/posted.
+mkdir "$tmp/bin"
+cat >"$tmp/bin/curl" <<'EOF'
+#!/usr/bin/env bash
+url= body=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -d) body=$2; shift 2 ;;
+    -H|-o|-X|--max-time) shift 2 ;;
+    -*) shift ;;
+    *) url=$1; shift ;;
+  esac
+done
+if [ -n "$body" ]; then
+  echo "$body" >>"$STUB_DIR/posted"
+else
+  page=${url##*page=}
+  cat "$STUB_DIR/page${page}.json" 2>/dev/null || echo '{"statuses": []}'
+fi
+EOF
+chmod +x "$tmp/bin/curl"
+
+function status {
+  jq -n --arg state "$1" --arg context "$2" --arg description "$3" \
+    '{state: $state, context: $context, description: $description}'
+}
+
+# Runs the clear and waits for the given number of posts: post_github_status posts in the background.
+function run_clear {
+  rm -f "$tmp/posted"
+  touch "$tmp/posted"
+  env STUB_DIR="$tmp" PATH="$tmp/bin:$SCRIPT_DIR/../internal:$PATH" CI=1 GITHUB_TOKEN=t GITHUB_REPOSITORY=org/repo COMMIT_HASH=abc \
+    "$SCRIPT" x-fast http://ci.aztec-labs.com/new
+  for _ in $(seq 1 50); do
+    [ "$(wc -l <"$tmp/posted")" -ge "$1" ] && return 0
+    sleep 0.1
+  done
+}
+
+function posted_contexts {
+  jq -r 'select(.state == "success") | .context' "$tmp/posted" | sort
+}
+
+echo "=== clear_github_failure_statuses Test Suite ==="
+
+echo "--- Test: only the job's own failures are cleared ---"
+{
+  status failure "ci/x-fast/test-a" "test-a"
+  status failure "ci/arm64/test-a" "test-a"
+  status failure "ci/x-fast-arm64/test-a" "test-a"
+  status failure "ci/test-c" "test-c"
+  status success "ci/x-fast/test-d" "test-d"
+  status failure "ci/x-fast" "./bootstrap.sh ci"
+  status failure "ci/x-fast/yarn build" "failed (12s)"
+} | jq -s '{statuses: .}' >"$tmp/page1.json"
+run_clear 2
+expected=$(printf '%s\n' "ci/x-fast/test-a" "ci/x-fast/yarn build" | sort)
+actual=$(posted_contexts)
+if [ "$actual" == "$expected" ]; then
+  pass "cleared exactly the job's own failures"
+else
+  fail "cleared exactly the job's own failures" "got: $(echo "$actual" | tr '\n' ',')"
+fi
+if jq -e 'select(.target_url != "http://ci.aztec-labs.com/new")' "$tmp/posted" >/dev/null; then
+  fail "cleared statuses link the passing run" "$(cat "$tmp/posted")"
+else
+  pass "cleared statuses link the passing run"
+fi
+rm -f "$tmp"/page*.json
+
+echo "--- Test: failures past the first page are cleared ---"
+for i in $(seq 1 100); do status success "ci/x-fast/ok-$i" "ok-$i"; done | jq -s '{statuses: .}' >"$tmp/page1.json"
+status failure "ci/x-fast/late" "late" | jq -s '{statuses: .}' >"$tmp/page2.json"
+run_clear 1
+if [ "$(posted_contexts)" == "ci/x-fast/late" ]; then
+  pass "reads every page of the combined status"
+else
+  fail "reads every page of the combined status" "got: $(posted_contexts | tr '\n' ',')"
+fi
+rm -f "$tmp"/page*.json
+
+echo "--- Test: no-op outside CI ---"
+status failure "ci/x-fast/test-a" "test-a" | jq -s '{statuses: .}' >"$tmp/page1.json"
+rm -f "$tmp/posted"
+env STUB_DIR="$tmp" PATH="$tmp/bin:$PATH" CI=0 GITHUB_TOKEN=t GITHUB_REPOSITORY=org/repo COMMIT_HASH=abc \
+  "$SCRIPT" x-fast http://ci.aztec-labs.com/new
+if [ ! -e "$tmp/posted" ]; then
+  pass "posts nothing when CI is not 1"
+else
+  fail "posts nothing when CI is not 1" "$(cat "$tmp/posted")"
+fi
+
+echo ""
+echo "Passed: $TESTS_PASSED, Failed: $TESTS_FAILED"
+[ "$TESTS_FAILED" -eq 0 ]
