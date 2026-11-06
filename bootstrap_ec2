@@ -57,8 +57,28 @@ fi
 # Allow override.
 cores=${CPUS:-$cores}
 
+# In the background and detached from the output pipes: a slow collector must not delay anything.
+function report_instance {
+  [ -n "${CI3_EVENT_ENDPOINT:-}" ] && [ -n "${CI3_EVENT_TOKEN:-}" ] && [ -n "${CI3_EVENT_PROJECT:-}" ] || return 0
+  # From state_dir: provisioning can fail after the launch, before bootstrap_ec2 reads these.
+  [ -s "${state_dir:-}/iid" ] && [ -z "${instance_reported:-}" ] || return 0
+  instance_reported=1
+  send_event \
+    event=ci.instance \
+    ci_log_id="${CI_LOG_ID:-}" \
+    run_id="${GITHUB_RUN_ID:-}" \
+    pr_number="${PR_NUMBER:-}" \
+    instance_id="$(tr -d '[:space:]' <"$state_dir/iid")" \
+    instance_type="$(cat "$state_dir/instance_type" 2>/dev/null || echo unknown)" \
+    lifecycle="$(cat "$state_dir/spot" 2>/dev/null || echo unknown)" \
+    instance_s=$(($(date +%s) - requested_at)) \
+    evicted="$1" >/dev/null 2>&1 &
+}
+
 # Trap function to terminate our running instance when the script exits.
 function cleanup {
+  # First: a cancelled job may not live through the termination.
+  report_instance false
   if [ -d "${state_dir:-}" ]; then
     aws_terminate_instance "$state_dir" >/dev/null 2>&1
   fi
@@ -123,6 +143,7 @@ if [ -n "$existing_instance" ]; then
 fi
 
 # Request new instance.
+requested_at=$(date +%s)
 # SSH mode needs a key pair; SSM mode uses instance profile (no key pair).
 if [ "$use_ssh" -eq 1 ]; then
   KEY_NAME=$key_name aws_request_instance "$instance_name" "$cores" "$arch" "$state_dir"
@@ -506,6 +527,8 @@ fi
 # If we were spot evicted, try again using on-demand.
 if [ "$exit_code" -eq 155 ]; then
   echo "Spot was evicted. Retrying with on-demand instance."
+  # exec skips the EXIT trap, and the evicted instance needs no termination.
+  report_instance true
   NO_SPOT=1 exec "$0" "$@"
 else
   # Print CI log URL at the end for easy access (avoid scrolling up).
