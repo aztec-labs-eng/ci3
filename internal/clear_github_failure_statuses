@@ -44,10 +44,5 @@ for page in $(seq 1 10); do
 done
 
 for context in "${contexts[@]}"; do
-  body=$(jq -n \
-    --arg target_url "$target_url" \
-    --arg description "$description" \
-    --arg context "$context" \
-    '{state: "success", target_url: $target_url, description: $description, context: $context}')
-  curl "${curl_args[@]}" -o /dev/null -X POST "${api}/statuses/${sha}" -d "$body" || true
+  post_github_status success "$context" "$target_url" "$description" || true
 done
