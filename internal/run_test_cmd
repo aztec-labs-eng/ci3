@@ -287,7 +287,7 @@ function post_github_failure_status {
 
   # Context: ci/<job_id>/<test_cmd>, so each job owns its failures and clear_github_failure_statuses can
   # clear them once the job passes. Truncated to 255 chars (GitHub limit).
-  local context="ci/${JOB_ID:-bootstrap}/${test_cmd}"
+  local context="$(github_status_context_prefix)${test_cmd}"
   context="${context:0:255}"
   # Description: truncated to 140 chars (GitHub limit).
   local description="${test_cmd}"

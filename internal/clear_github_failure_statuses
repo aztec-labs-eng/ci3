@@ -17,6 +17,8 @@ set -euo pipefail
 
 [ "${CI:-0}" != "1" ] && exit 0
 
+source "$(dirname "${BASH_SOURCE[0]}")/source_stdlib"
+
 job_id=${1:?usage: clear_github_failure_statuses <job_id> <target_url>}
 target_url=${2:?usage: clear_github_failure_statuses <job_id> <target_url>}
 
@@ -27,7 +29,7 @@ sha="${COMMIT_HASH:-}"
 
 api="https://api.github.com/repos/${repo}"
 curl_args=(-sf --max-time 20 -H "Authorization: token $token" -H "Accept: application/vnd.github+json")
-prefix="ci/${job_id}/"
+prefix=$(github_status_context_prefix "$job_id")
 description="job passed"
 
 # The combined status endpoint returns the latest status per context, 100 per page.
