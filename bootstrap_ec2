@@ -66,26 +66,21 @@ function report_instance {
   # From state_dir: provisioning can fail after the launch, before bootstrap_ec2 reads these.
   [ -s "${state_dir:-}/iid" ] && [ -z "${instance_reported:-}" ] || return 0
   instance_reported=1
-  local record
-  record=$(jq -c -n \
-    --arg repo "$github_repository" \
-    --arg ci_log_id "${CI_LOG_ID:-}" \
-    --arg run_id "${GITHUB_RUN_ID:-}" \
-    --arg run_attempt "${GITHUB_RUN_ATTEMPT:-}" \
-    --arg pr_number "${PR_NUMBER:-}" \
-    --arg id "$(tr -d '[:space:]' <"$state_dir/iid")" \
-    --arg type "$(cat "$state_dir/instance_type" 2>/dev/null || echo unknown)" \
-    --arg lifecycle "$(cat "$state_dir/spot" 2>/dev/null || echo unknown)" \
-    --argjson requested_at "$requested_at" \
-    --argjson ended_at "$(date +%s)" \
-    --argjson evicted "$evicted" \
-    '{event: "ci.instance", repo: $repo, ci_log_id: $ci_log_id,
-      run_id: ($run_id | tonumber? // null), run_attempt: ($run_attempt | tonumber? // null),
-      pr_number: ($pr_number | tonumber? // null),
-      instance_id: $id, instance_type: $type, lifecycle: $lifecycle,
-      requested_at: ($requested_at | todate), ended_at: ($ended_at | todate),
-      instance_s: ($ended_at - $requested_at), evicted: $evicted}') || return 0
-  otel_log "$record" &
+  local ended_at=$(date +%s)
+  send_event \
+    event=ci.instance \
+    repo="$github_repository" \
+    ci_log_id="${CI_LOG_ID:-}" \
+    run_id="${GITHUB_RUN_ID:-}" \
+    run_attempt="${GITHUB_RUN_ATTEMPT:-}" \
+    pr_number="${PR_NUMBER:-}" \
+    instance_id="$(tr -d '[:space:]' <"$state_dir/iid")" \
+    instance_type="$(cat "$state_dir/instance_type" 2>/dev/null || echo unknown)" \
+    lifecycle="$(cat "$state_dir/spot" 2>/dev/null || echo unknown)" \
+    requested_at="$(date -u -d "@$requested_at" +%FT%TZ)" \
+    ended_at="$(date -u -d "@$ended_at" +%FT%TZ)" \
+    instance_s=$((ended_at - requested_at)) \
+    evicted="$evicted" &
   report_pid=$!
 }
 
