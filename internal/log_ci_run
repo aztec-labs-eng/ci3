@@ -24,11 +24,7 @@ section="${CI_DASHBOARD:-$(ci_dashboard_section)}"
 # collide (and one repo's runs can't evict another's under the 1000-entry cap). The
 # dashboard string — "<org>/<repo>/<section>" — is the landing page's unit of listing.
 repo="${GITHUB_REPOSITORY:-}"
-if [ -n "$repo" ]; then
-  dashboard="$repo/$section"
-else
-  dashboard="$section" # pre-multi-repo callers with no GITHUB_REPOSITORY
-fi
+dashboard=$(ci_dashboard_key "$section")
 range_key="ci-run-$dashboard"
 
 if [ "$status" = "RUNNING" ]; then
