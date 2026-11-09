@@ -242,7 +242,7 @@ function track_test_history {
 
 function track_test_failed {
   # The dashboard's section page lists this key under its runs (dashboard/rk_core.py, get_section_data).
-  track_test "failed_tests${CI_DASHBOARD:+_$(ci_dashboard_key "$CI_DASHBOARD")}" "$1" 10000
+  track_test "failed_tests${CI_DASHBOARD:+/$(ci_dashboard_key "$CI_DASHBOARD")}" "$1" 10000
 }
 
 function publish_redis {
