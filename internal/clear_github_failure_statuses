@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Mark a job's leftover per-command failure statuses on the commit as passed.
 #
-# A failing test or command posts its own commit status, ci/<job_id>/<test_cmd> or
-# ci/<job_id>/<denoise command line>, and only that job ever posts under that context. Once the
-# job passes on the same commit, for example after a rerun, those failures are stale but GitHub
-# keeps showing them. Call this when the job succeeds to overwrite them with success.
+# A failing test posts its own commit status, ci/<job_id>/<test_cmd>, and only that job ever posts
+# under that context. Once the job passes on the same commit, for example after a rerun, those
+# failures are stale but GitHub keeps showing them. Call this when the job succeeds to overwrite
+# them with success.
 #
 # Only contexts under this job's ci/<job_id>/ prefix are touched, so failures from other jobs
 # on the same commit (e.g. the arm64 build) stay visible, even of the same test. The job's own
