@@ -118,7 +118,7 @@ def get_section_data(section: str, offset: int = 0, limit: int = 100,
             group_sorted = sorted(group, key=lambda x: x.get('ts', x.get('timestamp', 0)))
             lines += render(group_sorted)
 
-    fail_lines = get_list_as_string("failed_tests_" + section, 100)
+    fail_lines = get_list_as_string("failed_tests/" + section, 100)
     if fail_lines:
         lines += "\n"
         lines += f"Last 100 failed or flaked tests:\n\n"
