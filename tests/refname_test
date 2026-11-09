@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# ci_history_branch and ci_dashboard_key (internal/source_refname): the branch a run's test history joins, and the
+# repository-scoped key of a dashboard section.
+set -euo pipefail
+
+refname="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../internal/source_refname"
+# What source_refname reads from ci3's source when sourced alone.
+export CI=0 CI_FULL=0
+
+failures=0
+check() {
+  local name=$1 expected=$2 actual=$3
+  if [ "$actual" == "$expected" ]; then
+    echo "ok: $name"
+  else
+    echo "FAIL: $name: expected '$expected', got '$actual'"
+    failures=$((failures + 1))
+  fi
+}
+
+history() { env -u TARGET_BRANCH -u CI_MAINLINE_BRANCHES DEFAULT_BRANCH=main REF_NAME=feature "$@" \
+  bash -c "source $refname; ci_history_branch"; }
+
+check "a PR into the default branch" main "$(history TARGET_BRANCH=main)"
+check "a PR stacked on a feature branch" main "$(history TARGET_BRANCH=claude/zkm-1862-tracker)"
+check "a PR into a release line" v6 "$(history TARGET_BRANCH=v6)"
+check "a PR into a configured mainline branch" next "$(history TARGET_BRANCH=next CI_MAINLINE_BRANCHES='^(next|v[0-9]+)$')"
+check "a branch the configured mainlines leave out" main "$(history TARGET_BRANCH=v6 CI_MAINLINE_BRANCHES='^next$')"
+check "a push with no target, on the default branch" main "$(history REF_NAME=main)"
+check "a push with no target, on a feature branch" main "$(history)"
+check "a release tag" main "$(history TARGET_BRANCH=v1.2.3)"
+
+key() { env -u GITHUB_REPOSITORY REF_NAME=feature "$@" bash -c "source $refname; ci_dashboard_key \$0" "$section"; }
+check "a section in a repository" aztec-labs-eng/obsidion-wallet/main \
+  "$(section=main key GITHUB_REPOSITORY=aztec-labs-eng/obsidion-wallet)"
+check "a section with no repository" prs "$(section=prs key)"
+
+[ "$failures" -eq 0 ]

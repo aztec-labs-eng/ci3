@@ -66,7 +66,25 @@ function ci_dashboard_section {
     echo "prs"
   fi
 }
-export -f ci_default_branch ci_dashboard_section
+# The long-lived branch whose test history a run's results join: the branch the run targets (TARGET_BRANCH, else
+# REF_NAME) when that is the default branch or a mainline branch, else the default branch. A PR stacked on another
+# feature branch, or a feature branch's own push, lands there in the end.
+function ci_history_branch {
+  local ref="${TARGET_BRANCH:-$REF_NAME}"
+  if [ "$ref" == "$(ci_default_branch)" ] || [[ "$ref" =~ ${CI_MAINLINE_BRANCHES:-^v[0-9]+$} ]]; then
+    echo "$ref"
+  else
+    ci_default_branch
+  fi
+}
+
+# The dashboard section's own key part, scoped by repository as log_ci_run scopes the section's runs:
+# "<org>/<repo>/<section>", or the bare section for a caller with no GITHUB_REPOSITORY.
+function ci_dashboard_key {
+  local section="${1:-${CI_DASHBOARD:-$(ci_dashboard_section)}}"
+  echo "${GITHUB_REPOSITORY:+$GITHUB_REPOSITORY/}$section"
+}
+export -f ci_default_branch ci_dashboard_section ci_history_branch ci_dashboard_key
 
 if [ -z "${CI_FULL:-}" ]; then
   export CI_FULL=0

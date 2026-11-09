@@ -419,6 +419,8 @@ start_build() {
     -e JOB_ID=${JOB_ID:-} \
     -e REF_NAME=${REF_NAME:-} \
     -e TARGET_BRANCH=${TARGET_BRANCH:-} \
+    -e DEFAULT_BRANCH=$(ci_default_branch) \
+    -e CI_MAINLINE_BRANCHES=$(printf %q "${CI_MAINLINE_BRANCHES:-}") \
     -e CI_DASHBOARD=${CI_DASHBOARD:-} \
     -e PARENT_LOG_ID=${PARENT_LOG_ID:-} \
     -e NO_CACHE=${NO_CACHE:-} \
