@@ -311,14 +311,44 @@ function post_github_failure_status {
 
 # Post a message to the Slack channel (default #aztec3-ci) of each matching .test_patterns.yml entry whose notify_on
 # list (default [flake]) includes the event, mentioning the owners of the entries that share the channel.
+# The message function $2 gets the entries' test reference and issue reference.
 function slack_notify_entries {
-  local event=$1 msg=$2
-  local channel mentions
-  while IFS=$'\t' read -r channel mentions; do
-    slack_notify "${mentions:+$mentions: }$msg" "$channel"
+  local event=$1 msg_fn=$2
+  local channel mentions line issues
+  while IFS=$'\x1f' read -r channel mentions line issues; do
+    slack_notify "${mentions:+$mentions: }$($msg_fn "$(slack_test_ref "$line")" "$(slack_issue_ref $issues)")" "$channel"
   done < <(echo "$test_entries" | jq -rs --arg event "$event" '
     map(select([.notify_on // "flake"] | flatten | any(. == $event))) | group_by(.channel // "#aztec3-ci")[]
-    | [.[0].channel // "#aztec3-ci", ([.[].owners[]?] | unique | map("<@\(.)>") | join(" "))] | @tsv')
+    | [.[0].channel // "#aztec3-ci", ([.[].owners[]?] | unique | map("<@\(.)>") | join(" ")),
+       (.[0].line // "" | tostring), ([.[].issue // empty] | flatten | unique | join(" "))] | join("\u001f")')
+}
+
+# The test command, linked to its entry's line when the repository sets TEST_PATTERNS_URL, a URL with "{line}".
+function slack_test_ref {
+  if [ -n "${TEST_PATTERNS_URL:-}" ] && [ -n "$1" ]; then
+    echo "<${TEST_PATTERNS_URL//\{line\}/$1}|$test_cmd>"
+  else
+    echo "\`$test_cmd\`"
+  fi
+}
+
+# " Tracked in <issues>." for the entries' issues, each linked when the repository sets ISSUE_URL, a URL with "{issue}".
+function slack_issue_ref {
+  [ $# -eq 0 ] && return
+  local refs="" issue
+  for issue in "$@"; do
+    [ -n "${ISSUE_URL:-}" ] && issue="<${ISSUE_URL//\{issue\}/$issue}|$issue>"
+    refs+="${refs:+, }$issue"
+  done
+  echo " Tracked in $refs."
+}
+
+function fail_msg {
+  echo "Test FAILED on *${TARGET_BRANCH:-$REF_NAME}*: \`$test_cmd\` $DASHBOARD_URL/$log_key"
+}
+
+function flake_msg {
+  echo "Known flaky test ($1) <$DASHBOARD_URL/$log_key|flaked on *${TARGET_BRANCH:-$REF_NAME}*>.$2"
 }
 
 # Show FAILED and exit with error code.
@@ -340,7 +370,7 @@ function fail {
   [ "$CI" -eq 1 ] && post_github_failure_status
 
   if [ "$slack_notify_fail" -eq 1 ]; then
-    slack_notify_entries fail "Test FAILED on *${TARGET_BRANCH:-$REF_NAME}*: \`$test_cmd\` $DASHBOARD_URL/$log_key"
+    slack_notify_entries fail fail_msg
   fi
 
   exit $code
@@ -366,7 +396,7 @@ function flake {
   fi
 
   if [ "$slack_notify_flake" -eq 1 ]; then
-    slack_notify_entries flake "Test flaked on *${TARGET_BRANCH:-$REF_NAME}*: \`$test_cmd\` $DASHBOARD_URL/$log_key"
+    slack_notify_entries flake flake_msg
   fi
 
   exit 0

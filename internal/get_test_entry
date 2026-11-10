@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Returns the full test entry (as JSON) based on matching test name pattern and optional error regex.
+# Each entry also gets "line", its line in .test_patterns.yml.
 NO_CD=1 source $(dirname "${BASH_SOURCE[0]}")/../source
 
 export test_cmd=${1:-}
 log_file=${2:-}
-entries=$(yq e -o=json -r 'explode(.) | .tests[] | .regex as $pattern | select(strenv(test_cmd) | test($pattern))' .test_patterns.yml | jq -c .)
+# Without --header-preprocess=false, yq leaves the file's leading comment out of its line numbers.
+entries=$(yq e --header-preprocess=false -o=json -r '.tests[] |= (.line = line) | explode(.) | .tests[] | .regex as $pattern | select(strenv(test_cmd) | test($pattern))' .test_patterns.yml | jq -c .)
 
 # Iterate over each matching entry and output those that match error_regex (if present)
 while IFS= read -r entry; do

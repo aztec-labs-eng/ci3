@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# Tests the Slack post internal/run_test_cmd sends for a flake, against a curl stub on PATH:
+# - with TEST_PATTERNS_URL and ISSUE_URL, the command links to its entry's line and the issue is linked
+# - without them, the command is in code and the issue is plain text
+# - an entry without an issue gets no "Tracked in"
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT="$SCRIPT_DIR/../internal/run_test_cmd"
+
+RED=$'\033[0;31m'
+GREEN=$'\033[0;32m'
+NC=$'\033[0m'
+
+TESTS_PASSED=0
+TESTS_FAILED=0
+
+pass() { echo "${GREEN}✓${NC} $1"; ((TESTS_PASSED++)) || true; }
+fail() {
+  echo "${RED}✗${NC} $1: $2"
+  ((TESTS_FAILED++)) || true
+}
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+# The stub appends each posted Slack text to $tmp/posted.
+mkdir "$tmp/bin"
+cat >"$tmp/bin/curl" <<'EOF'
+#!/usr/bin/env bash
+while [ $# -gt 0 ]; do
+  [ "$1" == "--data" ] && jq -r .text <<<"$2" >>"$STUB_DIR/posted"
+  shift
+done
+echo '{"ok": true}'
+EOF
+chmod +x "$tmp/bin/curl"
+
+# Fails on its first run and passes on the next.
+cat >"$tmp/flaky" <<'EOF'
+#!/usr/bin/env bash
+[ -f "$STUB_DIR/ran" ] && exit 0
+touch "$STUB_DIR/ran"
+echo "the monitored command dumped core"
+exit 1
+EOF
+chmod +x "$tmp/flaky"
+
+cat >"$tmp/.test_patterns.yml" <<'EOF'
+# A leading comment, which yq leaves out of its line numbers unless told otherwise.
+
+names:
+  - owner: &owner "U1"
+
+tests:
+  - regex: 'flaky one'
+    retry: true
+    issue: ZKM-1
+    owners: [*owner]
+  - regex: 'flaky two'
+    retry: true
+EOF
+
+# Runs the given test command to a flake and prints the Slack text it posted.
+function run_flake {
+  rm -f "$tmp/posted" "$tmp/ran"
+  # The stub goes after ci3's own directories, which source puts first unless PATH starts with them.
+  (cd "$tmp" && env STUB_DIR="$tmp" PATH="$SCRIPT_DIR/..:$SCRIPT_DIR/../internal:$tmp/bin:$PATH" \
+    CI=0 CI_REDIS_AVAILABLE=0 REF_NAME=main COMMIT_HASH=abc SLACK_NOTIFY_FLAKE=1 ALLOW_FLAKES=1 SLACK_BOT_TOKEN=t DASHBOARD_URL=http://ci.example "$@" \
+    "$SCRIPT" "hash $tmp/flaky $test_name" &>/dev/null)
+  cat "$tmp/posted"
+}
+
+test_name="flaky one"
+got=$(run_flake TEST_PATTERNS_URL="https://repo.example/p.yml#L{line}" ISSUE_URL="https://issues.example/{issue}" |
+  sed "s|http://ci.example/[^|]*|LOG|")
+want="<@U1>: Known flaky test (<https://repo.example/p.yml#L7|$tmp/flaky flaky one>) <LOG|flaked on *main*>. Tracked in <https://issues.example/ZKM-1|ZKM-1>."
+[ "$got" == "$want" ] && pass "links the entry's line and its issue" || fail "links the entry's line and its issue" "$got"
+
+got=$(run_flake | sed "s|http://ci.example/[^|]*|LOG|")
+want="<@U1>: Known flaky test (\`$tmp/flaky flaky one\`) <LOG|flaked on *main*>. Tracked in ZKM-1."
+[ "$got" == "$want" ] && pass "names the command and issue without the URL settings" || fail "names the command and issue without the URL settings" "$got"
+
+test_name="flaky two"
+got=$(run_flake TEST_PATTERNS_URL="https://repo.example/p.yml#L{line}" | sed "s|http://ci.example/[^|]*|LOG|")
+want="Known flaky test (<https://repo.example/p.yml#L11|$tmp/flaky flaky two>) <LOG|flaked on *main*>."
+[ "$got" == "$want" ] && pass "leaves out the issue when the entry has none" || fail "leaves out the issue when the entry has none" "$got"
+
+echo "$TESTS_PASSED passed, $TESTS_FAILED failed"
+[ "$TESTS_FAILED" -eq 0 ]
