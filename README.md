@@ -118,7 +118,8 @@ moves out of `internal/` when a consuming repository needs it, not before.
 
 The dependency runs both ways. ci3 reads these from the repository it is building:
 
-- `.test_patterns.yml` — test skips, retries, owners and Slack notifications (`filter_test_cmds`, `run_test_cmd`).
+- `.test_patterns.yml` — test skips, retries, owners and Slack notifications (`filter_test_cmds`, `run_test_cmd`). An entry's optional `issue` (an id or a list of ids) names the issue that tracks it in its posts.
+- `TEST_PATTERNS_URL` and `ISSUE_URL` — optional; a Slack post about a test links its `.test_patterns.yml` entry through `TEST_PATTERNS_URL`, with `{line}` for the entry's line, and each of its issues through `ISSUE_URL`, with `{issue}` for the id.
 - `scripts/process_flake_log.py` — optional; run by `parallelize` after a test run when present.
 - `build-images/src/home/.gitconfig` — mounted into containers by `docker_isolate`.
 - `CI3_EVENT_ENDPOINT`, `CI3_EVENT_TOKEN` and `CI3_EVENT_PROJECT` — optional; when all are set, `bootstrap_ec2` sends a `ci.instance` event per build instance through `send_event` to that OTLP endpoint, for example `https://otel.aztec-labs.com`.
