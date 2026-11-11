@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Publish the files a test left in its artifacts directory (TEST_ARTIFACTS_DIR, which exec_test makes for each test),
+# such as a failed browser test's screenshots, and print a public link to each.
+#
+# Usage: upload_test_artifacts <dir> <key>
+#   dir  the directory to publish, its files at their paths relative to it
+#   key  where they go: s3://<bucket>/build-cache/test-artifacts/<key>/, served at
+#        https://build-cache.aztec-labs.com/test-artifacts/<key>/ (exec_test uses the test's log id)
+#
+# Outside CI, or without AWS credentials, it uploads nothing and prints where the files are instead.
+# A file over TEST_ARTIFACT_MAX_BYTES (default 20MB) is skipped, so a test cannot fill the bucket.
+NO_CD=1 source $(dirname "${BASH_SOURCE[0]}")/source
+
+dir=$1
+key=$2
+max=${TEST_ARTIFACT_MAX_BYTES:-20000000}
+
+files=$(cd "$dir" && find . -type f | sed 's#^\./##' | sort)
+[ -z "$files" ] && exit 0
+
+if [[ -z "${S3_FORCE_UPLOAD:-}" && "${CI:-0}" -eq 0 ]] || [ "${NO_CACHE_UPLOAD:-0}" -eq 1 ]; then
+  echo "Test artifacts (not uploaded outside CI): $dir"
+  exit 0
+fi
+
+content_type() {
+  case "$1" in
+    *.png) echo image/png ;;
+    *.jpg | *.jpeg) echo image/jpeg ;;
+    *.webm) echo video/webm ;;
+    *.html) echo "text/html; charset=utf-8" ;;
+    *.json) echo application/json ;;
+    *.zip) echo application/zip ;;
+    # Text is served as plain text, so a browser shows it rather than downloading it.
+    *.md | *.txt | *.log) echo "text/plain; charset=utf-8" ;;
+    *) echo application/octet-stream ;;
+  esac
+}
+
+while IFS= read -r file; do
+  size=$(stat -c %s "$dir/$file")
+  if [ "$size" -gt "$max" ]; then
+    echo "Test artifact skipped, $size bytes is over $max: $file"
+    continue
+  fi
+  if aws ${S3_BUILD_CACHE_AWS_PARAMS:-} s3 cp --content-type "$(content_type "$file")" "$dir/$file" \
+    "s3://aztec-ci-artifacts/build-cache/test-artifacts/$key/$file" &>/dev/null; then
+    echo "Test artifact: https://build-cache.aztec-labs.com/test-artifacts/$key/$(jq -rn --arg f "$file" '$f|@uri' | sed 's#%2F#/#g')"
+  else
+    echo "Test artifact upload failed: $file"
+  fi
+done <<< "$files"

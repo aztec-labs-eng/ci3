@@ -50,6 +50,11 @@ export ELU_MONITOR_FILE=$HOME/.elu_monitor_$$.log
 # $$ is this exec_test pid, so it is unique per parallel test command.
 export TEST_TIMING_FILE=$HOME/.test_timing_$$.log
 
+# A directory the test may leave files in worth keeping, such as a failed browser test's screenshots. Published after
+# the test by upload_test_artifacts, with a link to each file in the test's log.
+export TEST_ARTIFACTS_DIR=$HOME/.test_artifacts_$$
+mkdir -p "$TEST_ARTIFACTS_DIR"
+
 # Run the test with timestamps via process substitution (preserves exit code)
 set +e
 if [ "${ISOLATE:-0}" -eq 1 ]; then
@@ -82,5 +87,9 @@ if [ -s "$TEST_TIMING_FILE" ]; then
   fi
   rm -f "$TEST_TIMING_FILE"
 fi
+
+upload_test_artifacts "$TEST_ARTIFACTS_DIR" "${LOG_ID:-$(uuid)}" || true
+# Outside CI any files stay for the developer to open (upload_test_artifacts printed where); in CI they are published.
+if [ "${CI:-0}" -ne 0 ] || [ -z "$(ls -A "$TEST_ARTIFACTS_DIR")" ]; then rm -r "$TEST_ARTIFACTS_DIR"; fi
 
 exit $code

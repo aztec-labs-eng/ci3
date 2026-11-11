@@ -53,6 +53,9 @@ Tools are provided for the following themes.
    - **`parallelize`**: Reads test commands from STDIN, executes in parallel, aggregates logs.
    - **`run_test_cmd`**: Single test runner that can skip tests cached as “already passed.”
    - **`filter_cached_test_cmd`**: Filters out test commands known to have succeeded (based on flags in redis).
+   - **`upload_test_artifacts`**: A test may leave files worth keeping, such as a failed browser test's screenshots,
+     in `$TEST_ARTIFACTS_DIR`, which every test gets (inside a `docker_isolate` container too). After the test they
+     are published to `https://build-cache.aztec-labs.com/test-artifacts/<log id>/`, with a link to each in its log.
 
 3. **Ephemeral Logging**
    - **`denoise`**: Minimizes output spam; prints dots for each line, reveals full logs only if a command fails.
