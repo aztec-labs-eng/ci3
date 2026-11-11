@@ -12,11 +12,11 @@
           Oxygen, Ubuntu, Cantarell, "Fira Sans", "Droid Sans", "Helvetica Neue",
           Helvetica, Arial, sans-serif;
         -webkit-font-smoothing: antialiased;
-        background-color: #fff;
+        background-color: #242532;
         font-size: 16px;
       }
       body {
-        color: #4a4a4a;
+        color: #e0e0e0;
         margin: 8px;
         font-size: 1em;
         font-weight: 400;
@@ -31,16 +31,16 @@
         display: block;
       }
       a {
-        color: #3273dc;
+        color: #70a0ff;
         cursor: pointer;
         text-decoration: none;
       }
       a:hover {
-        color: #000;
+        color: #fff;
       }
       button {
         color: #fff;
-        background-color: #3298dc;
+        background-color: #3a3a5e;
         border-color: transparent;
         cursor: pointer;
         text-align: center;
@@ -85,21 +85,6 @@
         width: 100%;
         min-height: 300px; /* changed from fixed height */
       }
-      /* Dark theme overrides */
-      .dark-theme {
-        background-color: #242532;
-        color: #e0e0e0;
-      }
-      .dark-theme a {
-        color: #70a0ff;
-      }
-      .dark-theme button {
-        background-color: #3a3a5e;
-      }
-      /* Ensure chart titles use dark text color */
-      .dark-theme .benchmark-title {
-        color: #e0e0e0;
-      }
       .benchmark-group {
         margin-top: 8px;
         margin-bottom: 8px;
@@ -117,13 +102,6 @@
       <div class="header-item">
         <strong class="header-label">Repository:</strong>
         <a id="repository-link" rel="noopener"></a>
-      </div>
-      <!-- Added toggle switch for light/dark theme -->
-      <div class="header-item">
-        <label>
-          <input type="checkbox" id="theme-toggle" />
-          Dark Theme
-        </label>
       </div>
     </header>
     <main id="main"></main>
@@ -147,6 +125,9 @@
       const benchBase = "/bench/" + dashboard;
       document.title = `Benchmarks - ${dashboard}`;
       window.chartsByBenchName = window.chartsByBenchName || new Map(); // Map benchmark names to their chart instances
+
+      const CHART_TEXT_COLOR = "#e0e0e0";
+      const CHART_GRID_COLOR = "#555";
 
       // Function to create chart options and data
       function createChartConfig(label, dataset, textColor) {
@@ -177,6 +158,7 @@
                 ticks: {
                   fontColor: textColor,
                 },
+                gridLines: { color: CHART_GRID_COLOR },
               },
             ],
             yAxes: [
@@ -190,6 +172,7 @@
                   beginAtZero: true,
                   fontColor: textColor,
                 },
+                gridLines: { color: CHART_GRID_COLOR },
               },
             ],
           },
@@ -260,17 +243,6 @@
     <script id="main-script" type="text/ignore">
       "use strict";
       (function () {
-        // Read and apply saved theme from localStorage on load.
-        const savedTheme = localStorage.getItem("theme");
-        if (savedTheme === "dark") {
-          document.body.classList.add("dark-theme");
-          document.documentElement.classList.add("dark-theme");
-          document.getElementById("theme-toggle").checked = true;
-        }
-
-        // Global array to store chart instances.
-        window.chartInstances = [];
-
         function init() {
           // Only use the last 10 commits for each bench
           // to phase out obsolete benchmarks.
@@ -337,9 +309,7 @@
 
         function renderAllChars(dataSets) {
           function renderGraph(parent, name, dataset, fullKey) {
-            // Determine theme-specific text color.
-            const isDark = document.body.classList.contains("dark-theme");
-            const textColor = isDark ? "#e0e0e0" : "#4a4a4a";
+            const textColor = CHART_TEXT_COLOR;
 
             // Find or create grid container inside parent
             let grid = parent.querySelector(".benchmark-graphs");
@@ -364,8 +334,6 @@
               data,
               options,
             });
-            // Save chart instance for dynamic theme updates.
-            window.chartInstances.push(chart);
             // Also save by benchmark full key for updating
             if (fullKey) {
               window.chartsByBenchName.set(fullKey, chart);
@@ -375,8 +343,7 @@
           // Renders a multi-line chart combining multiple related series on one graph.
           // Each series gets its own colored line with a legend label.
           function renderStackedGraph(parent, name, stackedItems, fullKey) {
-            const isDark = document.body.classList.contains("dark-theme");
-            const textColor = isDark ? "#e0e0e0" : "#4a4a4a";
+            const textColor = CHART_TEXT_COLOR;
 
             let grid = parent.querySelector(".benchmark-graphs");
             if (!grid) {
@@ -486,6 +453,7 @@
                         fontColor: textColor,
                       },
                       ticks: { fontColor: textColor },
+                      gridLines: { color: CHART_GRID_COLOR },
                     },
                   ],
                   yAxes: [
@@ -496,6 +464,7 @@
                         fontColor: textColor,
                       },
                       ticks: { beginAtZero: true, fontColor: textColor },
+                      gridLines: { color: CHART_GRID_COLOR },
                     },
                   ],
                 },
@@ -568,7 +537,6 @@
               options: chartOptions,
             });
 
-            window.chartInstances.push(chart);
             if (fullKey) {
               window.chartsByBenchName.set(fullKey, chart);
             }
@@ -772,65 +740,11 @@
           }
         }
 
-        // Reusable function to update chart colors
-        function updateCharts(textColor, gridColor) {
-          window.chartInstances.forEach((chart) => {
-            chart.options.scales.xAxes.forEach((axis) => {
-              if (axis.scaleLabel) {
-                axis.scaleLabel.fontColor = textColor;
-              }
-              axis.ticks.fontColor = textColor;
-              if (axis.gridLines) {
-                axis.gridLines.color = gridColor;
-              }
-            });
-            chart.options.scales.yAxes.forEach((axis) => {
-              if (axis.scaleLabel) {
-                axis.scaleLabel.fontColor = textColor;
-              }
-              axis.ticks.fontColor = textColor;
-              if (axis.gridLines) {
-                axis.gridLines.color = gridColor;
-              }
-            });
-            if (chart.options.legend && chart.options.legend.labels) {
-              chart.options.legend.labels.fontColor = textColor;
-            }
-            if (chart.options.title) {
-              chart.options.title.fontColor = textColor;
-            }
-            chart.update();
-          });
-        }
-
-        // Add theme toggle listener to update charts when theme changes.
-        const themeToggle = document.getElementById("theme-toggle");
-        themeToggle.addEventListener("change", () => {
-          if (themeToggle.checked) {
-            document.body.classList.add("dark-theme");
-            document.documentElement.classList.add("dark-theme");
-            localStorage.setItem("theme", "dark");
-          } else {
-            document.body.classList.remove("dark-theme");
-            document.documentElement.classList.remove("dark-theme");
-            localStorage.setItem("theme", "light");
-          }
-          const isDark = document.body.classList.contains("dark-theme");
-          const textColor = isDark ? "#e0e0e0" : "#4a4a4a";
-          const gridColor = isDark ? "#555" : "#ccc";
-          updateCharts(textColor, gridColor);
-        });
-
         // Expose functions globally for dynamic updates
         window.init = init;
         window.renderAllChars = renderAllChars;
 
         renderAllChars(init()); // Start
-
-        // Update chart colors on page load if dark theme is already enabled.
-        if (document.body.classList.contains("dark-theme")) {
-          updateCharts("#e0e0e0", "#555");
-        }
       })();
     </script>
   </body>
