@@ -51,9 +51,11 @@ export ELU_MONITOR_FILE=$HOME/.elu_monitor_$$.log
 export TEST_TIMING_FILE=$HOME/.test_timing_$$.log
 
 # A directory the test may leave files in worth keeping, such as a failed browser test's screenshots. Published after
-# the test by upload_test_artifacts, with a link to each file in the test's log.
-export TEST_ARTIFACTS_DIR=$HOME/.test_artifacts_$$
-mkdir -p "$TEST_ARTIFACTS_DIR"
+# the test by upload_test_artifacts, with a link to each file in the test's log, and removed however this exits. Under
+# $HOME because docker_isolate mounts it and gives the container a /tmp of its own.
+mkdir -p "$HOME/.ci3/test-artifacts"
+export TEST_ARTIFACTS_DIR=$(mktemp -d "$HOME/.ci3/test-artifacts/XXXXXXXX")
+trap 'rm -rf "$TEST_ARTIFACTS_DIR"' EXIT
 
 # Run the test with timestamps via process substitution (preserves exit code)
 set +e
@@ -89,7 +91,5 @@ if [ -s "$TEST_TIMING_FILE" ]; then
 fi
 
 upload_test_artifacts "$TEST_ARTIFACTS_DIR" "${LOG_ID:-$(uuid)}" || true
-# Outside CI any files stay for the developer to open (upload_test_artifacts printed where); in CI they are published.
-if [ "${CI:-0}" -ne 0 ] || [ -z "$(ls -A "$TEST_ARTIFACTS_DIR")" ]; then rm -r "$TEST_ARTIFACTS_DIR"; fi
 
 exit $code
