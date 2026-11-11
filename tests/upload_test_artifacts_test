@@ -38,6 +38,7 @@ mkdir -p "$dir/send-spec-ts-64"
 printf 'png' > "$dir/send-spec-ts-64/test failed-1.png"
 printf '# Page snapshot' > "$dir/send-spec-ts-64/error-context.md"
 head -c 64 /dev/zero > "$dir/big.bin"
+echo '{}' > "$dir/.last-run.json"
 
 # --- Outside CI nothing is uploaded, and the directory is named ---
 out=$(env -u S3_FORCE_UPLOAD CI=0 "$SCRIPT" "$dir" local1)
@@ -60,7 +61,13 @@ grep -q "Test artifact skipped, 64 bytes is over 32: big.bin" <<< "$out" || fail
 head_object "abc123/big.bin" &>/dev/null && fail "limit: not uploaded"
 pass "size limit"
 
+# --- A hidden file is not published ---
+grep -q "last-run" <<< "$out" && fail "hidden: linked"
+head_object "abc123/.last-run.json" &>/dev/null && fail "hidden: uploaded"
+pass "hidden files"
+
 # --- An empty directory prints nothing ---
 mkdir "$WORK/empty"
+echo '{}' > "$WORK/empty/.last-run.json"
 [ -z "$(CI=1 "$SCRIPT" "$WORK/empty" none)" ] || fail "empty: printed something"
 pass "empty directory"

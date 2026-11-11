@@ -15,7 +15,8 @@ dir=$1
 key=$2
 max=${TEST_ARTIFACT_MAX_BYTES:-20000000}
 
-files=$(cd "$dir" && find . -type f | sed 's#^\./##' | sort)
+# Hidden files are tools' own bookkeeping (Playwright's .last-run.json), not the test's.
+files=$(cd "$dir" && find . -type f -not -name '.*' | sed 's#^\./##' | sort)
 [ -z "$files" ] && exit 0
 
 if [[ -z "${S3_FORCE_UPLOAD:-}" && "${CI:-0}" -eq 0 ]] || [ "${NO_CACHE_UPLOAD:-0}" -eq 1 ]; then
