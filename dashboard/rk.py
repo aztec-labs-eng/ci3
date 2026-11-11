@@ -176,7 +176,7 @@ def _split_dashboard(d: str) -> tuple[str, str]:
 
 
 def root() -> str:
-    out = update_status(0, '', '') + "\nCI runs:\n\n"
+    out = update_status(0, '', '') + f"\n{BOLD}CI runs:{RESET}\n\n"
 
     grouped: dict[str, list[tuple[str, str]]] = {}
     for d in list_dashboards():
@@ -187,19 +187,14 @@ def root() -> str:
         out += f"{YELLOW}(no active dashboards yet){RESET}\n"
     for repo in sorted(grouped):
         if repo:
-            out += f"{BOLD}{repo}{RESET}\n"
+            out += f"{repo}\n"
         for section, d in sorted(grouped[repo]):
             out += f"  {YELLOW}{hyperlink('/section/' + d, section)}{RESET}\n"
         out += "\n"
 
+    out += f"{BOLD}Benchmarks:{RESET}\n\n"
     out += bench_listing()
-
-    out += (
-        f"Benchmarks:\n"
-        f"\n{YELLOW}"
-        f"{hyperlink('/chonk-breakdowns', 'chonk breakdowns')}\n"
-        f"{RESET}"
-    )
+    out += f"{YELLOW}{hyperlink('/chonk-breakdowns', 'chonk breakdowns')}{RESET}\n"
     return out
 
 def bench_listing() -> str:
@@ -207,16 +202,16 @@ def bench_listing() -> str:
         dashboards = list_bench_dashboards()
     except Exception as e:
         print(f"Error listing benchmark series: {e}")
-        return f"Benchmarks:\n\n{RED}(unavailable){RESET}\n\n"
+        return f"{RED}(unavailable){RESET}\n\n"
     if not dashboards:
         return ""
     grouped: dict[str, list[tuple[str, str]]] = {}
     for d in dashboards:
         repo, section = _split_dashboard(d)
         grouped.setdefault(repo, []).append((section, d))
-    out = "Benchmarks:\n\n"
+    out = ""
     for repo in sorted(grouped):
-        out += f"{BOLD}{repo}{RESET}\n"
+        out += f"{repo}\n"
         for section, d in sorted(grouped[repo]):
             out += f"  {YELLOW}{hyperlink('/bench/' + d, section)}{RESET}\n"
         out += "\n"
