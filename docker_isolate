@@ -102,6 +102,7 @@ for attempt in $(seq 1 $max_attempts); do
     -e ANVIL_HARDFORK \
     -e ELU_MONITOR_FILE \
     -e TEST_TIMING_FILE \
+    -e TEST_ARTIFACTS_DIR \
     -e RUN_ID \
     "${arg_env_vars[@]}" \
     aztecprotocol/build:3.2 \

@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Tests ci3/upload_test_artifacts against a throwaway LocalStack S3. Run directly.
+SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/upload_test_artifacts"
+WORK=$(mktemp -d)
+container=upload-test-artifacts-test-$$
+
+cleanup() {
+  docker rm -f "$container" &>/dev/null || true
+  rm -rf "$WORK"
+}
+trap cleanup EXIT
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "PASS: $1"; }
+
+if ! docker info &>/dev/null; then
+  echo "SKIP: docker not available to run LocalStack"
+  exit 0
+fi
+
+docker run -d --name "$container" -e SERVICES=s3 -p 127.0.0.1::4566 localstack/localstack:4 > /dev/null
+port=$(docker port "$container" 4566/tcp | head -1 | sed 's/.*://')
+export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-east-1
+export S3_BUILD_CACHE_AWS_PARAMS="--endpoint-url http://127.0.0.1:$port"
+for _ in $(seq 120); do
+  curl -sf "http://127.0.0.1:$port/_localstack/health" > /dev/null && break
+  sleep 0.5
+done
+aws $S3_BUILD_CACHE_AWS_PARAMS s3 mb s3://aztec-ci-artifacts > /dev/null
+
+head_object() { # key -> its metadata
+  aws $S3_BUILD_CACHE_AWS_PARAMS s3api head-object --bucket aztec-ci-artifacts --key "build-cache/test-artifacts/$1"
+}
+
+dir=$WORK/artifacts
+mkdir -p "$dir/send-spec-ts-64"
+printf 'png' > "$dir/send-spec-ts-64/test failed-1.png"
+printf '# Page snapshot' > "$dir/send-spec-ts-64/error-context.md"
+head -c 64 /dev/zero > "$dir/big.bin"
+
+# --- Outside CI nothing is uploaded, and the directory is named ---
+out=$(env -u S3_FORCE_UPLOAD CI=0 "$SCRIPT" "$dir" local1)
+grep -qF "(not uploaded outside CI): $dir" <<< "$out" || fail "local: names the directory"
+head_object "local1/big.bin" &>/dev/null && fail "local: uploaded nothing"
+pass "outside CI"
+
+# --- In CI each file is uploaded with its type, and linked ---
+out=$(CI=1 TEST_ARTIFACT_MAX_BYTES=32 "$SCRIPT" "$dir" abc123)
+grep -qx "Test artifact: https://build-cache.aztec-labs.com/test-artifacts/abc123/send-spec-ts-64/test%20failed-1.png" \
+  <<< "$out" || fail "ci: png link (got: $out)"
+grep -qx "Test artifact: https://build-cache.aztec-labs.com/test-artifacts/abc123/send-spec-ts-64/error-context.md" \
+  <<< "$out" || fail "ci: md link"
+[ "$(head_object "abc123/send-spec-ts-64/test failed-1.png" | jq -r .ContentType)" == image/png ] || fail "ci: png type"
+[[ "$(head_object "abc123/send-spec-ts-64/error-context.md" | jq -r .ContentType)" == text/plain* ]] || fail "ci: md type"
+pass "in CI"
+
+# --- A file over the limit is skipped and said so ---
+grep -q "Test artifact skipped, 64 bytes is over 32: big.bin" <<< "$out" || fail "limit: says so"
+head_object "abc123/big.bin" &>/dev/null && fail "limit: not uploaded"
+pass "size limit"
+
+# --- An empty directory prints nothing ---
+mkdir "$WORK/empty"
+[ -z "$(CI=1 "$SCRIPT" "$WORK/empty" none)" ] || fail "empty: printed something"
+pass "empty directory"
