@@ -41,7 +41,7 @@ head -c 64 /dev/zero > "$dir/big.bin"
 
 # --- Outside CI nothing is uploaded, and the directory is named ---
 out=$(env -u S3_FORCE_UPLOAD CI=0 "$SCRIPT" "$dir" local1)
-grep -qF "(not uploaded outside CI): $dir" <<< "$out" || fail "local: names the directory"
+grep -qF "not uploaded outside CI: big.bin send-spec-ts-64/error-context.md" <<< "$out" || fail "local: names the files"
 head_object "local1/big.bin" &>/dev/null && fail "local: uploaded nothing"
 pass "outside CI"
 
