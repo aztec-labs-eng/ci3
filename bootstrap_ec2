@@ -67,11 +67,13 @@ function report_instance {
     event=ci.instance \
     ci_log_id="${CI_LOG_ID:-}" \
     run_id="${GITHUB_RUN_ID:-}" \
+    run_attempt="${GITHUB_RUN_ATTEMPT:-}" \
     pr_number="${PR_NUMBER:-}" \
     instance_id="$(tr -d '[:space:]' <"$state_dir/iid")" \
     instance_type="$(cat "$state_dir/instance_type" 2>/dev/null || echo unknown)" \
     lifecycle="$(cat "$state_dir/spot" 2>/dev/null || echo unknown)" \
     instance_s=$(($(date +%s) - requested_at)) \
+    ready_s="${ready_at:+$((ready_at - requested_at))}" \
     evicted="$1" >/dev/null 2>&1 &
 }
 
@@ -150,6 +152,7 @@ if [ "$use_ssh" -eq 1 ]; then
 else
   KEY_NAME= aws_request_instance "$instance_name" "$cores" "$arch" "$state_dir"
 fi
+ready_at=$(date +%s)
 ip=$(cat "$state_dir/ip")
 sir=""
 if [[ -f "$state_dir/sir" ]]; then
