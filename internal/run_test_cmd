@@ -371,7 +371,7 @@ function flake {
   fi
 
   if [ "$slack_notify_flake" -eq 1 ]; then
-    local msg="Test <$DASHBOARD_URL/$log_key|flaked> on *${TARGET_BRANCH:-$REF_NAME}*: \`$test_cmd\`. This is a known flake and it was retried."
+    local msg="Test <$DASHBOARD_URL/$log_key|flaked> on *${TARGET_BRANCH:-$REF_NAME}*: \`$test_cmd\`. This is a known flake and it was <$DASHBOARD_URL/$retry_log_key|retried>."
     local remove="address this flake and then remove it from <$(github_repo_url)/blob/${COMMIT_HASH:-HEAD}/.test_patterns.yml|flaky test patterns>."
     slack_notify_entries flake "$msg Please $remove" "$msg As owner, please $remove"
   fi
@@ -416,6 +416,7 @@ else
     if [ "$CI_REDIS_AVAILABLE" -eq 1 ]; then
       publish_log_final
     fi
+    retry_log_key=$log_key
     log_key=$failure_log_key
     log_info=$failure_log_info
     flake

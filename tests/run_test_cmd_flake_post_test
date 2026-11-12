@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Tests the Slack post internal/run_test_cmd sends for a flake, against a curl stub on PATH:
+# - the post links the failed run's log and the retry's log
 # - an entry with owners gets a post that mentions them and asks them, as owner, to remove the entry
 # - an entry without owners gets the same post without the mention and without "As owner"
 set -euo pipefail
@@ -62,17 +63,19 @@ function run_flake {
     CI=0 CI_REDIS_AVAILABLE=0 REF_NAME=main COMMIT_HASH=abc GITHUB_REPOSITORY=org/repo SLACK_NOTIFY_FLAKE=1 \
     ALLOW_FLAKES=1 SLACK_BOT_TOKEN=t DASHBOARD_URL=http://ci.example \
     "$SCRIPT" "hash $tmp/flaky $1" &>/dev/null)
-  sed "s|http://ci.example/[^|]*|LOG|" "$tmp/posted"
+  # The two log links differ: the first is the failed run's log and the second is the retry's.
+  [ "$(grep -o 'http://ci.example/[^|]*' "$tmp/posted" | sort -u | wc -l)" -eq 2 ] || echo "log links are not distinct"
+  sed "s|http://ci.example/[^|]*|LOG|g" "$tmp/posted"
 }
 
 patterns="<https://github.com/org/repo/blob/abc/.test_patterns.yml|flaky test patterns>"
 
 got=$(run_flake "flaky one")
-want="<@U1>: Test <LOG|flaked> on *main*: \`$tmp/flaky flaky one\`. This is a known flake and it was retried. As owner, please address this flake and then remove it from $patterns."
+want="<@U1>: Test <LOG|flaked> on *main*: \`$tmp/flaky flaky one\`. This is a known flake and it was <LOG|retried>. As owner, please address this flake and then remove it from $patterns."
 [ "$got" == "$want" ] && pass "asks the owners to remove the entry" || fail "asks the owners to remove the entry" "$got"
 
 got=$(run_flake "flaky two")
-want="Test <LOG|flaked> on *main*: \`$tmp/flaky flaky two\`. This is a known flake and it was retried. Please address this flake and then remove it from $patterns."
+want="Test <LOG|flaked> on *main*: \`$tmp/flaky flaky two\`. This is a known flake and it was <LOG|retried>. Please address this flake and then remove it from $patterns."
 [ "$got" == "$want" ] && pass "leaves out \"As owner\" when the entry has no owners" || fail "leaves out \"As owner\" when the entry has no owners" "$got"
 
 echo "$TESTS_PASSED passed, $TESTS_FAILED failed"
