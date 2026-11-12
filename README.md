@@ -125,7 +125,7 @@ The dependency runs both ways. ci3 reads these from the repository it is buildin
 - `.test_patterns.yml` — test skips, retries, owners and Slack notifications (`filter_test_cmds`, `run_test_cmd`).
 - `scripts/process_flake_log.py` — optional; run by `parallelize` after a test run when present.
 - `build-images/src/home/.gitconfig` — mounted into containers by `docker_isolate`.
-- `CI3_EVENT_ENDPOINT`, `CI3_EVENT_TOKEN` and `CI3_EVENT_PROJECT` — optional; when all are set, `bootstrap_ec2` sends a `ci.instance` event per build instance through `send_event` to that OTLP endpoint, for example `https://otel.aztec-labs.com`.
+- `CI3_EVENT_ENDPOINT`, `CI3_EVENT_TOKEN` and `CI3_EVENT_PROJECT` — optional; when all are set, `bootstrap_ec2` sends a `ci.instance` event per build instance through `send_event` to that OTLP endpoint, for example `https://otel.aztec-labs.com`. When `CI3_PASS_ENV` also gives them, with `GITHUB_RUN_ID` and `GITHUB_RUN_ATTEMPT`, to the build container, `run_test_cmd` sends a `ci.test` event per test.
 
 ### State shared between versions
 
