@@ -311,11 +311,16 @@ function post_github_failure_status {
 
 # Post a message to the Slack channel (default #aztec3-ci) of each matching .test_patterns.yml entry whose notify_on
 # list (default [flake]) includes the event, mentioning the owners of the entries that share the channel.
+# A channel whose entries have owners gets $3 instead of $2, when given.
 function slack_notify_entries {
-  local event=$1 msg=$2
+  local event=$1 msg=$2 owner_msg=${3:-$2}
   local channel mentions
   while IFS=$'\t' read -r channel mentions; do
-    slack_notify "${mentions:+$mentions: }$msg" "$channel"
+    if [ -n "$mentions" ]; then
+      slack_notify "$mentions: $owner_msg" "$channel"
+    else
+      slack_notify "$msg" "$channel"
+    fi
   done < <(echo "$test_entries" | jq -rs --arg event "$event" '
     map(select([.notify_on // "flake"] | flatten | any(. == $event))) | group_by(.channel // "#aztec3-ci")[]
     | [.[0].channel // "#aztec3-ci", ([.[].owners[]?] | unique | map("<@\(.)>") | join(" "))] | @tsv')
@@ -366,7 +371,9 @@ function flake {
   fi
 
   if [ "$slack_notify_flake" -eq 1 ]; then
-    slack_notify_entries flake "Test flaked on *${TARGET_BRANCH:-$REF_NAME}*: \`$test_cmd\` $DASHBOARD_URL/$log_key"
+    local msg="Test <$DASHBOARD_URL/$log_key|flaked> on *${TARGET_BRANCH:-$REF_NAME}*: \`$test_cmd\`. This is a known flake and it was retried."
+    local remove="address this flake and then remove it from <$(github_repo_url)/blob/${COMMIT_HASH:-HEAD}/.test_patterns.yml|flaky test patterns>."
+    slack_notify_entries flake "$msg Please $remove" "$msg As owner, please $remove"
   fi
 
   exit 0
