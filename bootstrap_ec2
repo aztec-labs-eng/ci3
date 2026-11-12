@@ -58,21 +58,31 @@ fi
 cores=${CPUS:-$cores}
 
 # In the background and detached from the output pipes: a slow collector must not delay anything.
+# result is success, failure, evicted, or unfinished: cancelled, or stopped before the build returned.
 function report_instance {
   [ -n "${CI3_EVENT_ENDPOINT:-}" ] && [ -n "${CI3_EVENT_TOKEN:-}" ] && [ -n "${CI3_EVENT_PROJECT:-}" ] || return 0
   # From state_dir: provisioning can fail after the launch, before bootstrap_ec2 reads these.
   [ -s "${state_dir:-}/iid" ] && [ -z "${instance_reported:-}" ] || return 0
   instance_reported=1
+  local result=unfinished
+  if [ "$1" = true ]; then
+    result=evicted
+  elif [ -n "${exit_code:-}" ]; then
+    [ "$exit_code" -eq 0 ] && result=success || result=failure
+  fi
   send_event \
     event=ci.instance \
     ci_log_id="${CI_LOG_ID:-}" \
     run_id="${GITHUB_RUN_ID:-}" \
+    run_attempt="${GITHUB_RUN_ATTEMPT:-}" \
     pr_number="${PR_NUMBER:-}" \
     instance_id="$(tr -d '[:space:]' <"$state_dir/iid")" \
     instance_type="$(cat "$state_dir/instance_type" 2>/dev/null || echo unknown)" \
     lifecycle="$(cat "$state_dir/spot" 2>/dev/null || echo unknown)" \
     instance_s=$(($(date +%s) - requested_at)) \
-    evicted="$1" >/dev/null 2>&1 &
+    ready_s="${ready_at:+$((ready_at - requested_at))}" \
+    evicted="$1" \
+    result="$result" >/dev/null 2>&1 &
 }
 
 # Trap function to terminate our running instance when the script exits.
@@ -150,6 +160,7 @@ if [ "$use_ssh" -eq 1 ]; then
 else
   KEY_NAME= aws_request_instance "$instance_name" "$cores" "$arch" "$state_dir"
 fi
+ready_at=$(date +%s)
 ip=$(cat "$state_dir/ip")
 sir=""
 if [[ -f "$state_dir/sir" ]]; then
