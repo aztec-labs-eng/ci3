@@ -34,9 +34,10 @@ dir=/opt/ci3
 git -C \$dir fetch --quiet origin $sha
 git -C \$dir checkout --quiet --force --detach $sha
 
-(umask 077
- aws secretsmanager get-secret-value --region us-east-2 --secret-id ci-dashboard/env \
-   --query SecretString --output text > /etc/rkapp.env.new)
+# Captured first: the snap aws CLI leaves the file empty when redirected straight into /etc.
+env=\$(aws secretsmanager get-secret-value --region us-east-2 --secret-id ci-dashboard/env \
+  --query SecretString --output text)
+(umask 077; printf '%s\n' "\$env" > /etc/rkapp.env.new)
 grep -q '^DASHBOARD_PASSWORD=.' /etc/rkapp.env.new || { echo "ERROR: ci-dashboard/env has no DASHBOARD_PASSWORD." >&2; exit 1; }
 mv /etc/rkapp.env.new /etc/rkapp.env
 
