@@ -1,10 +1,11 @@
-from flask import Flask, render_template_string, request, Response, redirect
+from flask import Flask, abort, render_template_string, request, Response, redirect
 from flask_compress import Compress
 from flask_httpauth import HTTPBasicAuth
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
 import gzip
+import hmac
 import json
 import os
 import re
@@ -31,11 +32,9 @@ app = Flask(__name__)
 Compress(app)
 auth = HTTPBasicAuth()
 
-# Conditional auth decorator - only require auth if password is set
-def optional_auth(f):
-    if DASHBOARD_PASSWORD:
-        return auth.login_required(f)
-    return f
+def require_auth(f):
+    """Requires basic auth. With no DASHBOARD_PASSWORD set, every request is refused."""
+    return auth.login_required(f)
 
 
 def read_from_s3(key):
@@ -86,10 +85,32 @@ def read_breakdown_from_s3(runtime, flow_name, sha):
 
     return None
 
+AUTH_FAIL_LIMIT = 20
+AUTH_FAIL_WINDOW_S = 15 * 60
+
+def _client_ip():
+    # Caddy replaces X-Forwarded-For with the real client address; the app port is loopback-only.
+    return request.headers.get('X-Forwarded-For', request.remote_addr or '').split(',')[0].strip()
+
 @auth.verify_password
 def verify_password(username, password):
-    if username == "aztec" and password == DASHBOARD_PASSWORD:
+    """Checks basic auth, refusing a client with 429 after too many failed logins."""
+    key = 'rk-auth-fail-' + _client_ip()
+    try:
+        failures = int(r.get(key) or 0)
+    except Exception:
+        failures = 0
+    if failures >= AUTH_FAIL_LIMIT:
+        abort(429)
+    if DASHBOARD_PASSWORD and username == "aztec" and hmac.compare_digest(password.encode(), DASHBOARD_PASSWORD.encode()):
         return username
+    # A browser's first request carries no credentials; only count actual attempts.
+    if username or password:
+        try:
+            r.set(key, 0, ex=AUTH_FAIL_WINDOW_S, nx=True)
+            r.incr(key)
+        except Exception:
+            pass
     return None
 
 _github_status_cache = {"status": None, "ts": 0}
@@ -388,7 +409,7 @@ TEMPLATE = """
 """
 
 @app.route('/')
-@optional_auth
+@require_auth
 def show_root():
     return render_template_string(
         TEMPLATE,
@@ -400,7 +421,7 @@ def show_root():
 # <path:section> so org/repo/section dashboards (with slashes) route correctly —
 # same reason as /list/<path:key> below (WSGI decodes %2F to / before routing).
 @app.route('/section/<path:section>')
-@optional_auth
+@require_auth
 def show_section(section):
     return render_template_string(
         TEMPLATE,
@@ -415,14 +436,14 @@ def show_section(section):
 # in PATH_INFO before Flask routes, so percent-encoding can't rescue a plain
 # <key> converter — only <path:key> matches segments containing /.
 @app.route('/list/<path:key>')
-@optional_auth
+@require_auth
 def get_list(key):
     value = get_list_as_string(key)
     follow = request.args.get('follow', 'top')
     return render_template_string(TEMPLATE, value=ansi_to_html(value), follow=follow, filter_str='', filter_prop='')
 
 @app.route('/chonk-breakdowns')
-@optional_auth
+@require_auth
 def chonk_breakdowns():
     """Serve the chonk breakdowns viewer page."""
     breakdown_html_path = Path('chonk-breakdowns/breakdown-viewer.html')
@@ -433,7 +454,7 @@ def chonk_breakdowns():
         return "Breakdown viewer not found", 404
 
 @app.route('/api/breakdown/flows')
-@optional_auth
+@require_auth
 def list_available_flows():
     """API endpoint to list available breakdown flows from S3, filtered by runtime and SHA."""
     runtime = request.args.get('runtime')
@@ -469,7 +490,7 @@ def list_available_flows():
     return Response(json.dumps(sorted(list(flows))), mimetype='application/json')
 
 @app.route('/api/breakdown/<runtime>/<flow_name>/<sha>')
-@optional_auth
+@require_auth
 def get_breakdown(runtime, flow_name, sha):
     """API endpoint to fetch breakdown JSON."""
     breakdown_data = read_breakdown_from_s3(runtime, flow_name, sha)
@@ -479,10 +500,10 @@ def get_breakdown(runtime, flow_name, sha):
     return Response('{"error": "Breakdown not found"}', mimetype='application/json', status=404)
 
 import bench
-list_bench_dashboards = bench.register(app, optional_auth, _s3, S3_LOGS_BUCKET)
+list_bench_dashboards = bench.register(app, require_auth, _s3, S3_LOGS_BUCKET)
 
 @app.route('/<key>')
-@optional_auth
+@require_auth
 def get_value(key):
     # Check if raw text format is requested
     raw_text = key.endswith('.txt')

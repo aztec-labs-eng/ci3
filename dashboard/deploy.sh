@@ -1,79 +1,59 @@
 #!/bin/bash
-# Deploy the CI dashboard (rkapp + Caddy TLS) to the ci host.
+# Deploy the CI dashboard (rkapp + Caddy TLS) to the ci-dashboard host over SSM.
 #
-# Safe to run repeatedly. The first run also performs the one-time cutover from the
-# legacy systemd `rkapp` unit (which bound :80 directly) to the compose stack (rkapp on
-# loopback, Caddy terminating TLS on 443 and redirecting 80). Nothing running is touched
-# until the compose config parses and the image builds; if the new stack is not healthy
-# after the cutover, it is torn down and the legacy unit is restarted on its previous image.
+#   ./deploy.sh [commit]    commit of aztec-labs-eng/ci3 to deploy (default: main)
 #
-# Prerequisite: /etc/rkapp.env (root, mode 600) on the host — the app secrets. Compose
-# reads env_file client-side, so every compose command runs under sudo.
+# The host clones public ci3 at that exact commit and builds from it, so what runs is
+# what is in the repo. It writes /etc/rkapp.env (mode 600) from the ci-dashboard/env
+# secret, brings the compose stack up, and fails unless the app answers on loopback
+# and through Caddy over https.
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-HOST=${1:-ubuntu@ci.aztec-labs.com}
-KEY=~/.ssh/build_instance_key
+REPO=https://github.com/aztec-labs-eng/ci3
+export AWS_DEFAULT_REGION=us-east-2
 
-rsync -avz --exclude='deploy.sh' -e "ssh -i $KEY" "$SCRIPT_DIR"/ "$HOST":rk
+if [ -n "${1:-}" ]; then
+  sha=$(git ls-remote "$REPO" "$1" | cut -f1 | head -1)
+  sha=${sha:-$1}
+else
+  sha=$(git ls-remote "$REPO" refs/heads/main | cut -f1)
+fi
+[[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "ERROR: could not resolve '${1:-main}' to a full commit." >&2; exit 1; }
 
-ssh -i "$KEY" "$HOST" '
-  set -euo pipefail
-  if ! sudo test -f /etc/rkapp.env; then
-    echo "ERROR: /etc/rkapp.env missing. Create it (root, mode 600) before deploying." >&2
-    exit 1
+iid=$(aws ec2 describe-instances \
+  --filters Name=tag:Name,Values=ci-dashboard Name=instance-state-name,Values=running \
+  --query 'Reservations[].Instances[].InstanceId' --output text)
+[[ "$iid" =~ ^i-[0-9a-f]+$ ]] || { echo "ERROR: expected one running ci-dashboard instance, got '$iid'." >&2; exit 1; }
+
+echo "Deploying ci3 $sha to $iid..."
+"$(dirname "${BASH_SOURCE[0]}")/../internal/ssm_send_command" "$iid" - <<EOF
+set -euo pipefail
+export PATH=/snap/bin:\$PATH
+dir=/opt/ci3
+[ -d \$dir/.git ] || git clone --quiet $REPO \$dir
+git -C \$dir fetch --quiet origin $sha
+git -C \$dir checkout --quiet --force --detach $sha
+
+(umask 077
+ aws secretsmanager get-secret-value --region us-east-2 --secret-id ci-dashboard/env \
+   --query SecretString --output text > /etc/rkapp.env.new)
+grep -q '^DASHBOARD_PASSWORD=.' /etc/rkapp.env.new || { echo "ERROR: ci-dashboard/env has no DASHBOARD_PASSWORD." >&2; exit 1; }
+mv /etc/rkapp.env.new /etc/rkapp.env
+
+cd \$dir/dashboard
+docker compose up -d --build --remove-orphans
+
+# 401 is healthy: every route requires the password.
+up() { [ "\$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "\$@" || true)" = 401 ]; }
+# Caddy obtains its certificate on first boot, so https can lag the app.
+for _ in \$(seq 60); do
+  if up http://127.0.0.1:8080/ && up --resolve ci.aztec-labs.com:443:127.0.0.1 https://ci.aztec-labs.com/; then
+    echo "Dashboard up at https://ci.aztec-labs.com (ci3 $sha)"
+    exit 0
   fi
-  mkdir -p /home/ubuntu/rk/caddy/data /home/ubuntu/rk/caddy/config
-  cd rk
-  compose() { sudo docker compose "$@"; }
-
-  compose config -q
-
-  legacy=0
-  if systemctl is-active --quiet rkapp || systemctl is-enabled --quiet rkapp 2>/dev/null; then
-    legacy=1
-    # The build retags rkapp, which the legacy unit also runs; keep its image for rollback.
-    docker tag rkapp rkapp:legacy
-  fi
-
-  compose build
-
-  if [ "$legacy" = 1 ]; then
-    echo "Retiring legacy systemd rkapp unit..."
-    sudo systemctl disable --now rkapp
-  fi
-
-  # 200, or 401 when the dashboard password is set.
-  up() {
-    local code
-    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "$@" || true)
-    [ "$code" = 200 ] || [ "$code" = 401 ]
-  }
-
-  healthy=0
-  if compose up -d; then
-    # Caddy obtains its certificate on first boot, so https can lag the app.
-    for _ in $(seq 60); do
-      if up http://127.0.0.1:8080/ &&
-         up --resolve ci.aztec-labs.com:443:127.0.0.1 https://ci.aztec-labs.com/; then
-        healthy=1
-        break
-      fi
-      sleep 2
-    done
-  fi
-
-  if [ "$healthy" = 0 ]; then
-    echo "ERROR: dashboard not healthy on loopback and via Caddy https." >&2
-    compose logs --tail=30 >&2 || true
-    if [ "$legacy" = 1 ]; then
-      echo "Rolling back to the legacy systemd rkapp unit..." >&2
-      compose down || true
-      docker tag rkapp:legacy rkapp || true
-      sudo systemctl enable --now rkapp
-    fi
-    exit 1
-  fi
-  docker rmi rkapp:legacy >/dev/null 2>&1 || true
-  echo "Dashboard up behind Caddy: https://ci.aztec-labs.com"
-'
+  sleep 2
+done
+echo "ERROR: dashboard not healthy on loopback and via Caddy https." >&2
+docker compose logs --tail=30 >&2 || true
+exit 1
+EOF
