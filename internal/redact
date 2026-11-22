@@ -23,6 +23,7 @@
 
 use strict;
 use warnings;
+use MIME::Base64 qw(encode_base64);
 
 # Enable auto-flush so logs appear immediately (crucial for CI/CD)
 $| = 1;
@@ -35,7 +36,7 @@ my $re;
 # Iterate over all environment variables
 while (my ($key, $val) = each %ENV) {
     # Check if the KEY name matches our sensitive keywords
-    if ($key =~ /(?:KEY|TOKEN|PASSWORD|SECRET|MNEMONIC)$/) {
+    if ($key =~ /(?:KEY|TOKEN|PASSWORD|SECRET|MNEMONIC|(?:^|_)PAT|CREDENTIALS?)$/) {
         next unless defined $val and $val ne '';
 
         # NOTE: We assume anything with 6 or less characters is a poor secret and bail.
@@ -71,8 +72,31 @@ sub build_regex {
     #    but sort handles priority well enough here.
     @list = sort { length($b) <=> length($a) } @list;
 
-    my $pattern = join("|", map { quotemeta $_ } @list);
+    my $pattern = join("|", (map { quotemeta $_ } @list), (map { base64_forms($_) } @list));
     return qr/$pattern/;
+}
+
+# Patterns matching a secret wherever it sits inside base64 or base64url text, e.g.
+# "Authorization: basic base64(user:secret)", where the secret never appears as-is.
+# base64 encodes 3-byte groups, so the secret encodes one of three ways depending on its
+# offset; for each, keep only the characters that depend on the secret alone. A trailing
+# partial group then also matches the character and padding that close the encoding.
+sub base64_forms {
+    my ($secret) = @_;
+    my @forms;
+    for my $offset (0, 1, 2) {
+        my $encoded = encode_base64(("\0" x $offset) . $secret, '');
+        $encoded =~ s/=+$//;
+        my $partial = ($offset + length($secret)) % 3;
+        my $from = $offset ? $offset + 1 : 0;
+        my $to = length($encoded) - ($partial ? 1 : 0);
+        my $core = substr($encoded, $from, $to - $from);
+        next if length($core) < 6;
+        my $tail = $partial ? '[A-Za-z0-9+\/_-]?={0,2}' : '';
+        (my $url = $core) =~ tr{+/}{-_};
+        push @forms, map { quotemeta($_) . $tail } $core eq $url ? ($core) : ($core, $url);
+    }
+    return @forms;
 }
 
 # --- 3. Main Processing Loop ---

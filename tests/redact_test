@@ -41,6 +41,22 @@ TM() {
   [[ "$actual" == "$expected" ]] && pass "$name" || fail "$name" "$expected" "$actual"
 }
 
+# TB: a secret base64-encoded after a prefix, as in an "Authorization: basic" header.
+# The prefix's length sets where the secret falls within base64's 3-byte groups, so each offset
+# encodes it differently. Passes when everything but the prefix's own encoding (plus the few
+# characters shared between prefix and secret) is masked.
+TB() {
+  local name=$1 prefix=$2 secret=$3 urlsafe=${4:-}
+  local encoded actual residue max
+  encoded=$(printf '%s%s' "$prefix" "$secret" | base64 -w0)
+  [ -z "$urlsafe" ] || encoded=$(printf '%s' "$encoded" | tr '+/' '-_' | tr -d '=')
+  actual=$(env -i PATH="$CLEAN_PATH" GH_PAT="$secret" bash -c "printf '%s\n' 'basic $encoded' | '$REDACT'" 2>&1) || true
+  residue=${actual#basic }
+  residue=${residue//\*\*\*/}
+  max=$(((${#prefix} + 2) / 3 * 4 + 4))
+  [[ "$actual" == *'***'* && ${#residue} -le $max ]] && pass "$name" || fail "$name" "at most $max unmasked chars" "$actual"
+}
+
 echo "=== Redact Test Suite ==="
 
 echo "--- 1. Variable Auto-Discovery ---"
@@ -49,7 +65,11 @@ T "TOKEN match" "x ***" "x mytoken99" "AUTH_TOKEN=mytoken99"
 T "PASSWORD match" "x ***" "x secretpw1" "DB_PASSWORD=secretpw1"
 T "SECRET match" "x ***" "x topsecret" "MY_SECRET=topsecret"
 T "MNEMONIC match" "x ***" "x mnemonic1" "WALLET_MNEMONIC=mnemonic1"
+T "PAT match" "x ***" "x mypat9999" "OXIDE_PAT=mypat9999"
+T "CREDENTIAL match" "x ***" "x mycred999" "SERVICE_CREDENTIAL=mycred999"
+T "CREDENTIALS match" "x ***" "x mycreds99" "GOOGLE_CREDENTIALS=mycreds99"
 T "No match passthrough" "x notsecret" "x notsecret" "MY_DATA=notsecret"
+T "PAT only as a whole word" "x compatval1" "x compatval1" "NODE_COMPAT=compatval1"
 T "Short env secret ignored (5 chars)" "x abcde" "x abcde" "API_KEY=abcde"
 T "Min length env secret redacted (6 chars)" "x ***" "x abcdef" "API_KEY=abcdef"
 
@@ -107,7 +127,16 @@ TM "non-add-mask command passthrough" "::set-output::value" $'::set-output::valu
 TM "add-mask partial line not stripped" "prefix ::add-mask::val" $'prefix ::add-mask::val'
 TM "Windows CRLF in ::add-mask::" "x ***" $'::add-mask::secret\r\nx secret'
 
-echo "--- 8. Malicious Inputs (The 'Inception' Tests) ---"
+echo "--- 8. Base64-Encoded Secrets ---"
+T "Base64 of whole secret" "basic ***" "basic $(printf 'ghp_abcdefghijklmnopqrstuvwxyz012345' | base64 -w0)" "GH_PAT=ghp_abcdefghijklmnopqrstuvwxyz012345"
+TB "Base64 after a 15-byte prefix (offset 0)" "x-access-token:" "ghp_abcdefghijklmnopqrstuvwxyz012345"
+TB "Base64 after a 13-byte prefix (offset 1)" "oauth2:token:" "ghp_abcdefghijklmnopqrstuvwxyz012345"
+TB "Base64 after a 14-byte prefix (offset 2)" "x-access-toke:" "ghp_abcdefghijklmnopqrstuvwxyz012345"
+TB "Base64 of a secret not a multiple of 3" "x-access-token:" "ghp_abcdefghijklmnopqrstuvwxyz0123"
+TB "URL-safe base64" "x-access-token:" "ghp_ab>>de??ghijklmnopqrstuvwxyz012345" urlsafe
+TM "Base64 of add-mask value" "basic ***" $'::add-mask::hunter2hunter2\nbasic aHVudGVyMmh1bnRlcjI='
+
+echo "--- 9. Malicious Inputs (The 'Inception' Tests) ---"
 
 # 1. User sets secret to "***".
 # If we aren't careful, we loop forever or redact the whole world.
