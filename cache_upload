@@ -27,12 +27,10 @@ if [[ "${NO_CACHE_UPLOAD:-0}" -eq 1 ]]; then
   exit 0
 fi
 
-# In SSM/instance-profile mode, AWS CLI falls back to IMDS for credentials.
-if [[ "${CI_SSM_MODE:-0}" -eq 0 ]]; then
-  if [[ -z "${AWS_ACCESS_KEY_ID:-}" || -z "${AWS_SECRET_ACCESS_KEY:-}" ]] && ! aws configure get aws_access_key_id &>/dev/null; then
-    echo_stderr "Skipping upload, no AWS credentials found."
-    exit 0
-  fi
+# Any source counts: the environment, a profile, or a build instance's instance profile.
+if ! aws configure export-credentials &>/dev/null; then
+  echo_stderr "Skipping upload, no AWS credentials found."
+  exit 0
 fi
 
 if [ -z "${S3_FORCE_UPLOAD:-}" ] && \

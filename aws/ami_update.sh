@@ -3,8 +3,6 @@ source $(dirname "${BASH_SOURCE[0]}")/../source
 
 arch=${ARCH:-$(arch)}
 
-[ -t 1 ] && ssh_args="-t" || ssh_args=""
-
 # Trap function to terminate our running instance when the script exits.
 function on_exit {
     [ "${NO_TERMINATE:-0}" -eq 0 ] && aws_terminate_instance $state_dir
@@ -27,37 +25,37 @@ case "$arch" in
     exit 1
 esac
 
-# Request new instance (ami: ubuntu 24.04 LTS). SSH mode: the setup below is driven over ssh.
+# Request new instance (ami: ubuntu 24.04 LTS). Like a build instance, it has no key pair and is driven over SSM.
 state_dir=$(mktemp -d /tmp/aws_request_instance.XXXXXX)
 trap on_exit EXIT
-AMI=$ami KEY_NAME=${KEY_NAME:-build-instance} aws_request_instance ami_update_$arch 4 $arch $state_dir
-ip=$(cat $state_dir/ip)
+AMI=$ami aws_request_instance ami_update_$arch 4 $arch $state_dir
 iid=$(cat $state_dir/iid | tr -d '\n\r' | xargs)
 
-echo "Instance ip: $ip"
+echo "Instance id: $iid"
 
 # Initial setup.
-ssh $ssh_args -F build_instance_ssh_config ubuntu@$ip '
+ssm_send_command "$iid" '
   set -e
-  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --batch --yes --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
-  echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-  sudo apt update
-  sudo apt install -y apt-transport-https ca-certificates curl software-properties-common docker-ce
-  sudo usermod -aG docker ${USER}
-  mkdir .aws
+  curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --batch --yes --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg
+  echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" > /etc/apt/sources.list.d/docker.list
+  apt update
+  apt install -y apt-transport-https ca-certificates curl software-properties-common docker-ce
+  usermod -aG docker ubuntu
+  sudo -u ubuntu mkdir -p /home/ubuntu/.aws
 '
 
-ssh -F build_instance_ssh_config -O exit ubuntu@$ip 2>/dev/null || true
-
 # Download uncompressed crs onto machine for fast cold starts (deletes compressed if present).
-ssh $ssh_args -F build_instance_ssh_config ubuntu@$ip 'export CRS_FORMAT=uncompressed; bash -s' < download_crs.sh
+SSM_RUN_AS=ubuntu ssm_send_command "$iid" "export HOME=/home/ubuntu CRS_FORMAT=uncompressed; cd ~; $(cat download_crs.sh)"
 
 # Pull devbox onto host, and build into docker-in-docker volume.
-ssh $ssh_args -F build_instance_ssh_config ubuntu@$ip "
+ssm_send_command "$iid" "
   docker run --privileged --rm -v bootstrap_ci_local_docker:/var/lib/docker aztecprotocol/devbox:3.2 bash -c \"
     docker pull aztecprotocol/build:3.2
   \"
 "
+
+# No image carries an SSH key: instances made from it take none, and are reached only through SSM.
+ssm_send_command "$iid" 'rm -f /home/ubuntu/.ssh/authorized_keys /root/.ssh/authorized_keys'
 
 if [ "${NO_AMI:-0}" -eq 0 ]; then
   export AWS_DEFAULT_REGION=us-east-2

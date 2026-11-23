@@ -10,7 +10,7 @@ The breakdown viewer visualizes:
 - **Nested operations**: Click on components to drill down into child operations
 - **Percentage distribution**: See which operations dominate proving time
 
-Data comes from CI benchmark runs and is stored in `/logs-disk/bench/bb-breakdown/`.
+Data comes from CI benchmark runs and is stored in `s3://aztec-ci-artifacts/logs/bench/bb-breakdown/`.
 
 ## Local Testing
 
@@ -27,9 +27,8 @@ Data comes from CI benchmark runs and is stored in `/logs-disk/bench/bb-breakdow
    ```bash
    mkdir -p /tmp/rkapp-test-data/bench/bb-breakdown
    # Fetch all breakdowns for a specific SHA (e.g., f4decd6)
-   scp -i ~/.ssh/build_instance_key \
-     "ubuntu@ci.aztec-labs.com:/logs-disk/bench/bb-breakdown/*-f4decd6*.log.gz" \
-     /tmp/rkapp-test-data/bench/bb-breakdown/
+   aws s3 cp --recursive s3://aztec-ci-artifacts/logs/bench/bb-breakdown/ \
+     /tmp/rkapp-test-data/bench/bb-breakdown/ --exclude '*' --include '*-f4decd6*.log.gz'
    ```
 
 3. **Start the server:**

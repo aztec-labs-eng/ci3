@@ -33,21 +33,16 @@ function cleanup {
 trap 'cleanup' SIGINT SIGTERM
 trap 'delete_lt' EXIT
 
-# KeyName is optional: omit when KEY_NAME is empty (SSM-only mode).
-key_name_json=""
+# Instances get no key pair and a security group with no inbound rules: they are reached only through SSM.
 if [ -n "${KEY_NAME:-}" ]; then
-  key_name_json="\"KeyName\": \"$KEY_NAME\","
+  echo_stderr "KEY_NAME is set, but build instances no longer take an SSH key pair; they are reached through SSM."
+  exit 1
 fi
 
 # Always attach the instance profile so containers can use instance-profile credentials.
 CI3_INSTANCE_PROFILE_NAME=${CI3_INSTANCE_PROFILE_NAME:-ci3-build-instance-profile}
 
-# In SSM mode use the CI3 security group; in SSH mode use the original SG (allows port 22).
-if [ -z "${KEY_NAME:-}" ]; then
-  sg_id="${CI3_SECURITY_GROUP_ID:-sg-01fe61a1c1aaeb393}"
-else
-  sg_id="sg-0ccd4e5df0dcca0c9"
-fi
+sg_id="${CI3_SECURITY_GROUP_ID:-sg-01fe61a1c1aaeb393}"
 
 # create-fleet spreads across AZs via subnet overrides, which must live in the
 # same VPC as the security group. Pick one subnet per AZ.
@@ -75,7 +70,6 @@ fi
 lt_data=$(cat <<EOF
 {
   "ImageId": "$ami",
-  $key_name_json
   "IamInstanceProfile": { "Name": "$CI3_INSTANCE_PROFILE_NAME" },
   "SecurityGroupIds": ["$sg_id"],
   "BlockDeviceMappings": [
@@ -224,45 +218,28 @@ while [ -z "${ip:-}" ]; do
   echo $ip > $ip_path
 done
 
-# When no key pair (SSM-only), wait for SSM registration and set the shutdown timer.
-if [ -z "${KEY_NAME:-}" ]; then
-  >&2 echo "Waiting for SSM registration for instance $iid..."
-  SECONDS=0
-  while (( SECONDS < 300 )); do
-    ssm_status=$(aws ssm describe-instance-information \
-      --region us-east-2 \
-      --filters "Key=InstanceIds,Values=$iid" \
-      --query "InstanceInformationList[0].PingStatus" \
-      --output text 2>/dev/null) || true
-    >&2 echo "SSM status: ${ssm_status:-Inactive}"
-    [ "$ssm_status" = "Online" ] && break
-    sleep 5
-  done
+# Wait for SSM registration and set the shutdown timer.
+>&2 echo "Waiting for SSM registration for instance $iid..."
+SECONDS=0
+while (( SECONDS < 300 )); do
+  ssm_status=$(aws ssm describe-instance-information \
+    --region us-east-2 \
+    --filters "Key=InstanceIds,Values=$iid" \
+    --query "InstanceInformationList[0].PingStatus" \
+    --output text 2>/dev/null) || true
+  >&2 echo "SSM status: ${ssm_status:-Inactive}"
+  [ "$ssm_status" = "Online" ] && break
+  sleep 5
+done
 
-  if [ "$ssm_status" != "Online" ]; then
-    >&2 echo "Timed out waiting for SSM to see instance $iid"
-    exit 1
-  fi
+if [ "$ssm_status" != "Online" ]; then
+  >&2 echo "Timed out waiting for SSM to see instance $iid"
+  exit 1
+fi
 
-  # Set the shutdown timer via SSM, mirroring the SSH path. Fire-and-forget.
-  # Non-fatal: a failed timer shouldn't abort provisioning (reaper catches orphans).
-  if [ "${NO_TERMINATE:-0}" -ne 1 ]; then
-    >&2 echo "Setting shutdown timer (+${AWS_SHUTDOWN_TIME:-60} min) via SSM..."
-    SSM_NO_WAIT=1 ssm_send_command "$iid" "sudo shutdown -h +${AWS_SHUTDOWN_TIME:-60}" || \
-      >&2 echo "Warning: failed to set shutdown timer via SSM (non-fatal)."
-  fi
-else
-  # Wait till ssh port is open.
-  >&2 echo "Waiting for SSH at $ip..."
-  SECONDS=0
-  # Absolute: sourcing ../source cd's into this script's directory, not ci3's root.
-  SSH_CONFIG_PATH=${SSH_CONFIG_PATH:-$ci3/aws/build_instance_ssh_config}
-  [ "${NO_TERMINATE:-0}" -eq 1 ] && LIVE_CMD=true || LIVE_CMD="sudo shutdown -h +${AWS_SHUTDOWN_TIME:-60}"
-  while ! ssh -F $SSH_CONFIG_PATH -o ConnectTimeout=1 $ip $LIVE_CMD > /dev/null 2>&1; do
-    if (( SECONDS >= 60 )); then
-      >&2 echo "Timeout: SSH could not login to $ip within 60 seconds."
-      exit 1
-    fi
-    sleep 1
-  done
+# Fire-and-forget. Non-fatal: a failed timer shouldn't abort provisioning (reaper catches orphans).
+if [ "${NO_TERMINATE:-0}" -ne 1 ]; then
+  >&2 echo "Setting shutdown timer (+${AWS_SHUTDOWN_TIME:-60} min) via SSM..."
+  SSM_NO_WAIT=1 ssm_send_command "$iid" "sudo shutdown -h +${AWS_SHUTDOWN_TIME:-60}" || \
+    >&2 echo "Warning: failed to set shutdown timer via SSM (non-fatal)."
 fi
