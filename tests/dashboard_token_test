@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# dashboard_token against a stub OAuth server: sign-in by device flow, reuse of a fresh token,
+# silent refresh of an expired one, and refusal when never signed in.
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+passed=0
+failed=0
+pass() { echo -e "  \033[32m✓ $1\033[0m"; ((++passed)); }
+fail() { echo -e "  \033[31m✗ $1\033[0m"; ((++failed)); }
+
+function jwt {
+  local payload
+  payload=$(printf '{"email":"dev@example.com","exp":%s}' "$1" | base64 -w0 | tr '/+' '_-' | tr -d '=')
+  echo "eyJhbGciOiJSUzI1NiJ9.$payload.sig"
+}
+fresh=$(jwt $(($(date +%s) + 3600)))
+expired=$(jwt $(($(date +%s) - 10)))
+refreshed=$(jwt $(($(date +%s) + 3599)))
+
+# The stub answers by URL and form fields, logs each request, and answers the device-code poll
+# with authorization_pending once before granting.
+mkdir -p "$tmp/bin"
+cat >"$tmp/bin/curl" <<EOF
+#!/usr/bin/env bash
+url= form=
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    --data-urlencode) form+="\$2&"; shift 2 ;;
+    -X|--max-time) shift 2 ;;
+    -*) shift ;;
+    *) url=\$1; shift ;;
+  esac
+done
+echo "\$url \$form" >>"$tmp/requests"
+case "\$url \$form" in
+  "https://device.test/code "*)
+    echo '{"device_code":"dev-code","user_code":"ABCD-EFGH","verification_url":"https://example.test/device","interval":0,"expires_in":60}' ;;
+  "https://token.test/token "*grant_type=urn:ietf:params:oauth:grant-type:device_code*)
+    if [ -f "$tmp/polled" ]; then
+      echo '{"id_token":"$fresh","refresh_token":"refresh-1"}'
+    else
+      touch "$tmp/polled"; echo '{"error":"authorization_pending"}'
+    fi ;;
+  "https://token.test/token "*grant_type=refresh_token*refresh_token=refresh-1*)
+    echo '{"id_token":"$refreshed"}' ;;
+  *) echo '{"error":"invalid_grant"}' ;;
+esac
+EOF
+chmod +x "$tmp/bin/curl"
+
+function token {
+  env PATH="$tmp/bin:$PATH" XDG_CONFIG_HOME="$tmp/config" CI_DASHBOARD_OAUTH_CLIENT_ID=client \
+    CI_DASHBOARD_OAUTH_CLIENT_SECRET=secret CI_DASHBOARD_OAUTH_DEVICE_URL=https://device.test/code \
+    CI_DASHBOARD_OAUTH_TOKEN_URL=https://token.test/token "$script_dir/dashboard_token" "$@"
+}
+state="$tmp/config/ci3/dashboard_token.json"
+
+if out=$(token 2>"$tmp/err"); then
+  fail "a token is printed before anyone signed in: $out"
+elif grep -q "not signed in" "$tmp/err"; then
+  pass "refuses, and says how to sign in, before anyone signed in"
+else
+  fail "refused without saying why: $(cat "$tmp/err")"
+fi
+
+out=$(token login 2>"$tmp/err")
+if [ "$out" = "$fresh" ] && grep -q "ABCD-EFGH" "$tmp/err"; then
+  pass "login shows the code, waits for approval and prints the token"
+else
+  fail "login printed '$out', stderr: $(cat "$tmp/err")"
+fi
+
+if [ "$(stat -c %a "$state")" = 600 ]; then
+  pass "the stored tokens are readable only by their owner"
+else
+  fail "state file mode is $(stat -c %a "$state")"
+fi
+
+: >"$tmp/requests"
+out=$(token)
+if [ "$out" = "$fresh" ] && [ ! -s "$tmp/requests" ]; then
+  pass "a fresh token is reused without asking the server"
+else
+  fail "printed '$out' after $(wc -l <"$tmp/requests") requests"
+fi
+
+jq --arg t "$expired" '.id_token = $t' "$state" >"$state.new" && mv "$state.new" "$state"
+out=$(token)
+if [ "$out" = "$refreshed" ] && [ "$(jq -r .refresh_token "$state")" = refresh-1 ]; then
+  pass "an expired token is refreshed silently, keeping the refresh token"
+else
+  fail "after expiry printed '$out', refresh token $(jq -r .refresh_token "$state")"
+fi
+
+jq --arg t "$expired" '.id_token = $t | .refresh_token = "revoked"' "$state" >"$state.new" && mv "$state.new" "$state"
+if out=$(token 2>"$tmp/err"); then
+  fail "a revoked refresh token still printed '$out'"
+elif grep -q "not signed in" "$tmp/err"; then
+  pass "a revoked refresh token asks to sign in again"
+else
+  fail "a revoked refresh token failed without saying why: $(cat "$tmp/err")"
+fi
+
+echo
+echo "$passed passed, $failed failed."
+[ "$failed" -eq 0 ]

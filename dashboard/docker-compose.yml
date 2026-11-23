@@ -1,9 +1,13 @@
 # The CI dashboard behind Caddy (TLS), on the ci-dashboard host. deploy.sh rolls it out.
 #
-# Both services sit on the default bridge network; only Caddy publishes public ports.
+# All services sit on the default bridge network; only Caddy publishes public ports.
 # The app is also published on host loopback for deploy.sh's health check.
 # Settings come from /etc/rkapp.env, which deploy.sh writes from the ci-dashboard/env
 # secret. AWS access is the instance role's (read-only), via the metadata service.
+#
+# Caddy asks oauth2-proxy about every request (forward_auth) and passes only signed-in ones to
+# the app. The OAuth provider, its client, the cookie secret, the allowed email domains and the
+# issuers whose bearer tokens are accepted all come from the secret as OAUTH2_PROXY_* settings.
 services:
   rkapp:
     build: .
@@ -17,10 +21,30 @@ services:
       driver: json-file
       options: {max-size: "10m", max-file: "3"}
 
+  oauth2-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.6
+    restart: always
+    env_file: /etc/rkapp.env
+    environment:
+      OAUTH2_PROXY_HTTP_ADDRESS: 0.0.0.0:4180
+      OAUTH2_PROXY_REVERSE_PROXY: "true"
+      # Caddy proxies to the app itself; oauth2-proxy only answers yes or no.
+      OAUTH2_PROXY_UPSTREAMS: static://202
+      OAUTH2_PROXY_REDIRECT_URL: https://ci.aztec-labs.com/oauth2/callback
+      OAUTH2_PROXY_COOKIE_SECURE: "true"
+      OAUTH2_PROXY_SET_XAUTHREQUEST: "true"
+      OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
+      # Scripts send an ID token from dashboard_token; an invalid one is refused outright.
+      OAUTH2_PROXY_SKIP_JWT_BEARER_TOKENS: "true"
+      OAUTH2_PROXY_BEARER_TOKEN_LOGIN_FALLBACK: "false"
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
   caddy:
     image: caddy:2-alpine
     restart: always
-    depends_on: [rkapp]
+    depends_on: [rkapp, oauth2-proxy]
     ports:
       - "80:80"
       - "443:443"

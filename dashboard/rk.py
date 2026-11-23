@@ -1,11 +1,10 @@
 from flask import Flask, abort, render_template_string, request, Response, redirect
 from flask_compress import Compress
-from flask_httpauth import HTTPBasicAuth
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
+import functools
 import gzip
-import hmac
 import json
 import os
 import re
@@ -26,15 +25,29 @@ S3_LOGS_BUCKET = os.getenv('S3_LOGS_BUCKET', 'aztec-ci-artifacts')
 S3_LOGS_PREFIX = os.getenv('S3_LOGS_PREFIX', 'logs')
 
 _s3 = boto3.client('s3', region_name='us-east-2', config=Config(connect_timeout=10, read_timeout=60, retries={'max_attempts': 3}))
-DASHBOARD_PASSWORD = os.getenv('DASHBOARD_PASSWORD', '')
+# Shared with oauth2-proxy, which checks it too: the app refuses a user from any other domain
+# even if the proxy in front lets one through.
+ALLOWED_EMAIL_DOMAINS = {d.strip().lower() for d in os.getenv('OAUTH2_PROXY_EMAIL_DOMAINS', '').split(',') if d.strip()}
 
 app = Flask(__name__)
 Compress(app)
-auth = HTTPBasicAuth()
+
+
+def signed_in_email():
+    """The user oauth2-proxy signed in, as Caddy passes them on, or None unless their domain is allowed."""
+    email = request.headers.get('X-Auth-Request-Email', '').strip().lower()
+    _, at, domain = email.rpartition('@')
+    return email if at and domain in ALLOWED_EMAIL_DOMAINS else None
+
 
 def require_auth(f):
-    """Requires basic auth. With no DASHBOARD_PASSWORD set, every request is refused."""
-    return auth.login_required(f)
+    """Requires a user signed in through oauth2-proxy. With no allowed domains set, every request is refused."""
+    @functools.wraps(f)
+    def wrapper(*args, **kwargs):
+        if signed_in_email() is None:
+            abort(401)
+        return f(*args, **kwargs)
+    return wrapper
 
 
 def read_from_s3(key):
@@ -83,34 +96,6 @@ def read_breakdown_from_s3(runtime, flow_name, sha):
     except Exception as e:
         print(f"S3 prefix search failed for breakdown {breakdown_name}: {e}")
 
-    return None
-
-AUTH_FAIL_LIMIT = 20
-AUTH_FAIL_WINDOW_S = 15 * 60
-
-def _client_ip():
-    # Caddy replaces X-Forwarded-For with the real client address; the app port is loopback-only.
-    return request.headers.get('X-Forwarded-For', request.remote_addr or '').split(',')[0].strip()
-
-@auth.verify_password
-def verify_password(username, password):
-    """Checks basic auth, refusing a client with 429 after too many failed logins."""
-    key = 'rk-auth-fail-' + _client_ip()
-    try:
-        failures = int(r.get(key) or 0)
-    except Exception:
-        failures = 0
-    if failures >= AUTH_FAIL_LIMIT:
-        abort(429)
-    if DASHBOARD_PASSWORD and username == "aztec" and hmac.compare_digest(password.encode(), DASHBOARD_PASSWORD.encode()):
-        return username
-    # A browser's first request carries no credentials; only count actual attempts.
-    if username or password:
-        try:
-            r.set(key, 0, ex=AUTH_FAIL_WINDOW_S, nx=True)
-            r.incr(key)
-        except Exception:
-            pass
     return None
 
 _github_status_cache = {"status": None, "ts": 0}

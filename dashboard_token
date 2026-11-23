@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# Prints an OpenID Connect ID token for the CI dashboard, to send as `Authorization: Bearer <token>`.
+#
+#   dashboard_token          print a token, refreshing it silently; fails if never signed in
+#   dashboard_token login    sign in with the OAuth 2.0 device flow (RFC 8628), then print a token
+#
+# The consuming repository supplies its OAuth client, one of the installed-app kind that may use
+# the device flow (Google calls it "TVs and Limited Input devices"). Such a client's secret is not
+# confidential, so the repository can commit it:
+#   CI_DASHBOARD_OAUTH_CLIENT_ID, CI_DASHBOARD_OAUTH_CLIENT_SECRET
+#   CI_DASHBOARD_OAUTH_DEVICE_URL, CI_DASHBOARD_OAUTH_TOKEN_URL   default to Google's endpoints
+#
+# Signing in stores a refresh token in ~/.config/ci3/dashboard_token.json (mode 600), so later
+# calls need no browser until the provider revokes it. Prompts go to stderr, the token to stdout.
+set -euo pipefail
+
+client_id=${CI_DASHBOARD_OAUTH_CLIENT_ID:-}
+client_secret=${CI_DASHBOARD_OAUTH_CLIENT_SECRET:-}
+device_url=${CI_DASHBOARD_OAUTH_DEVICE_URL:-https://oauth2.googleapis.com/device/code}
+token_url=${CI_DASHBOARD_OAUTH_TOKEN_URL:-https://oauth2.googleapis.com/token}
+state=${XDG_CONFIG_HOME:-$HOME/.config}/ci3/dashboard_token.json
+
+if [ -z "$client_id" ]; then
+  echo "dashboard_token: CI_DASHBOARD_OAUTH_CLIENT_ID is not set." >&2
+  exit 1
+fi
+
+function token_exp {
+  local payload
+  payload=$(cut -d. -f2 <<<"$1" | tr '_-' '/+')
+  while [ $((${#payload} % 4)) -ne 0 ]; do payload+="="; done
+  base64 -d <<<"$payload" 2>/dev/null | jq -r '.exp // 0' 2>/dev/null || echo 0
+}
+
+# Keeps the refresh token from an earlier sign-in when a refresh response carries none.
+function save {
+  local response=$1 refresh tmp
+  refresh=$(jq -r '.refresh_token // empty' <<<"$response")
+  [ -n "$refresh" ] || refresh=$(jq -r '.refresh_token // empty' "$state" 2>/dev/null || true)
+  mkdir -p "$(dirname "$state")"
+  tmp=$(mktemp "$state.XXXXXX")
+  chmod 600 "$tmp"
+  jq -n --arg c "$client_id" --arg i "$(jq -r .id_token <<<"$response")" --arg r "$refresh" \
+    '{client_id: $c, id_token: $i, refresh_token: $r}' >"$tmp"
+  mv "$tmp" "$state"
+}
+
+# Posts a form to the token endpoint. Values arrive on stdin as name=value lines, so the refresh
+# token and device code never appear in a process listing.
+function post_token {
+  local args=(-s --max-time 30 -X POST "$token_url")
+  local line
+  while IFS= read -r line; do args+=(--data-urlencode "$line"); done
+  curl "${args[@]}" || true
+}
+
+function cached {
+  [ -f "$state" ] || return 1
+  [ "$(jq -r .client_id "$state")" = "$client_id" ] || return 1
+  local id_token
+  id_token=$(jq -r '.id_token // empty' "$state")
+  [ -n "$id_token" ] && [ "$(token_exp "$id_token")" -gt $(($(date +%s) + 60)) ] || return 1
+  echo "$id_token"
+}
+
+function refresh {
+  [ -f "$state" ] || return 1
+  [ "$(jq -r .client_id "$state")" = "$client_id" ] || return 1
+  local refresh_token response
+  refresh_token=$(jq -r '.refresh_token // empty' "$state")
+  [ -n "$refresh_token" ] || return 1
+  response=$(printf '%s\n' "client_id=$client_id" "client_secret=$client_secret" \
+    "grant_type=refresh_token" "refresh_token=$refresh_token" | post_token)
+  jq -e '.id_token' <<<"$response" >/dev/null 2>&1 || return 1
+  save "$response"
+  jq -r .id_token <<<"$response"
+}
+
+function login {
+  local response device_code user_code url interval expires deadline error
+  response=$(curl -s --max-time 30 -X POST "$device_url" \
+    --data-urlencode "client_id=$client_id" --data-urlencode "scope=openid email")
+  device_code=$(jq -r '.device_code // empty' <<<"$response" 2>/dev/null || true)
+  if [ -z "$device_code" ]; then
+    echo "dashboard_token: could not start sign-in: $response" >&2
+    exit 1
+  fi
+  user_code=$(jq -r .user_code <<<"$response")
+  # Google names it verification_url; RFC 8628 says verification_uri.
+  url=$(jq -r '.verification_uri // .verification_url' <<<"$response")
+  interval=$(jq -r '.interval // 5' <<<"$response")
+  expires=$(jq -r '.expires_in // 900' <<<"$response")
+  echo "To sign in to the CI dashboard, open $url and enter the code: $user_code" >&2
+
+  deadline=$(($(date +%s) + expires))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    sleep "$interval"
+    response=$(printf '%s\n' "client_id=$client_id" "client_secret=$client_secret" \
+      "grant_type=urn:ietf:params:oauth:grant-type:device_code" "device_code=$device_code" | post_token)
+    if jq -e '.id_token' <<<"$response" >/dev/null 2>&1; then
+      save "$response"
+      echo "Signed in." >&2
+      jq -r .id_token <<<"$response"
+      return
+    fi
+    error=$(jq -r '.error // empty' <<<"$response" 2>/dev/null || true)
+    case "$error" in
+      authorization_pending) ;;
+      slow_down) interval=$((interval + 5)) ;;
+      *)
+        echo "dashboard_token: sign-in failed: ${error:-$response}" >&2
+        exit 1
+        ;;
+    esac
+  done
+  echo "dashboard_token: sign-in timed out." >&2
+  exit 1
+}
+
+case "${1:-}" in
+  login)
+    login
+    ;;
+  "")
+    cached || refresh || {
+      echo "dashboard_token: not signed in to the CI dashboard. Sign in once with: ${CI_DASHBOARD_LOGIN_HINT:-dashboard_token login}" >&2
+      exit 1
+    }
+    ;;
+  *)
+    echo "usage: dashboard_token [login]" >&2
+    exit 1
+    ;;
+esac
