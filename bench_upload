@@ -25,18 +25,14 @@ NO_CD=1 source $(dirname "${BASH_SOURCE[0]}")/source
 bench_json=${1:?usage: bench_upload <bench-json>}
 [ -f "$bench_json" ] || { echo_stderr "bench_upload: bench json not found: $bench_json"; exit 1; }
 
-if [[ -z "${S3_FORCE_UPLOAD:-}" && "${CI:-0}" -eq 0 ]]; then
-  echo_stderr "Skipping benchmark upload because CI=0 and S3_FORCE_UPLOAD not set."
+if ! bench_upload_enabled; then
+  echo_stderr "Skipping benchmark upload: not a CI run (CI=0, no S3_FORCE_UPLOAD), or a release."
   exit 0
 fi
 
 repo=$(github_repo)
 [ -n "$repo" ] || { echo_stderr "bench_upload: cannot determine the repository (<org>/<repo>)."; exit 1; }
 section=${CI_DASHBOARD:-$(ci_dashboard_section)}
-if [ "$section" == "tags" ]; then
-  echo_stderr "Skipping benchmark upload for a release run."
-  exit 0
-fi
 if [ "$(jq 'length' "$bench_json")" -eq 0 ]; then
   echo_stderr "Skipping benchmark upload: no results in $bench_json."
   exit 0

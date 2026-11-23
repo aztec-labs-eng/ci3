@@ -84,7 +84,13 @@ function ci_dashboard_key {
   local section="${1:-${CI_DASHBOARD:-$(ci_dashboard_section)}}"
   echo "${GITHUB_REPOSITORY:+$GITHUB_REPOSITORY/}$section"
 }
-export -f ci_default_branch ci_dashboard_section ci_history_branch ci_dashboard_key
+# Whether this run publishes benchmark results: in CI (or with S3_FORCE_UPLOAD set), and never for a release. Shared by
+# bench_upload and a repository's own uploads of benchmark detail, so they all publish from the same runs.
+function bench_upload_enabled {
+  [ -n "${S3_FORCE_UPLOAD:-}" ] || [ "${CI:-0}" -eq 1 ] || return 1
+  [ "${CI_DASHBOARD:-$(ci_dashboard_section)}" != tags ]
+}
+export -f ci_default_branch ci_dashboard_section ci_history_branch ci_dashboard_key bench_upload_enabled
 
 if [ -z "${CI_FULL:-}" ]; then
   export CI_FULL=0

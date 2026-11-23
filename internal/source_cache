@@ -1,6 +1,5 @@
 # Cache system for CI logs.
 # Logs are written to Redis (synchronous) and S3 (background).
-# Legacy disk transfer functions (SSH to bastion) are kept but no longer used in normal flow.
 # NOTE: This file depends on source_redis being sourced first.
 
 # Transfer log to S3 (accepts gzipped data on stdin).
@@ -28,33 +27,6 @@ function cache_s3_transfer_to {
   local base_prefix="${no_scheme#*/}"
 
   aws s3 ${S3_BUILD_CACHE_AWS_PARAMS:-} cp - "s3://${bucket}/${base_prefix}/${subfolder}/${key}.log.gz" &>/dev/null
-}
-
-# Transfer log to bastion via SSH (accepts gzipped data on stdin)
-# Usage: cat file.gz | cache_disk_transfer <key>
-function cache_disk_transfer {
-  local key="$1"
-  local prefix="${key:0:4}"
-
-  # Transfer via SSH pipe using persistent multiplexed connection
-  # Use first 4 chars as subdirectory to avoid too many files in one dir
-  ssh -F "${ci3}/aws/build_instance_ssh_config" \
-      -o ConnectTimeout=5 \
-      ci-bastion.aztecprotocol.com \
-      "mkdir -p /logs-disk/${prefix} && cat > /logs-disk/${prefix}/${key}.log.gz" &>/dev/null
-}
-
-# Transfer to bastion with explicit subfolder (accepts gzipped data on stdin)
-# Usage: cat file.gz | cache_disk_transfer_to <subfolder> <key>
-# Legacy: transfer to bastion disk via SSH. Kept for fallback but no longer called in normal flow.
-function cache_disk_transfer_to {
-  local subfolder="$1"
-  local key="$2"
-
-  ssh -F "${ci3}/aws/build_instance_ssh_config" \
-      -o ConnectTimeout=5 \
-      ci-bastion.aztecprotocol.com \
-      "mkdir -p /logs-disk/${subfolder} && cat > /logs-disk/${subfolder}/${key}.log.gz" &>/dev/null
 }
 
 # Whether logs reach the dashboard: through redis, or on a CI host without redis (a GitHub
@@ -99,5 +71,4 @@ function log_publish {
 }
 
 # Export functions
-export -f cache_s3_transfer cache_s3_transfer_to cache_disk_transfer cache_disk_transfer_to \
-  log_store_available log_publish
+export -f cache_s3_transfer cache_s3_transfer_to log_store_available log_publish

@@ -28,11 +28,9 @@ fi
 if [[ "${NO_CACHE_UPLOAD:-0}" -eq 1 ]]; then
   skip "Skipping upload because NO_CACHE_UPLOAD=1."
 fi
-# In SSM/instance-profile mode, AWS CLI falls back to IMDS for credentials.
-if [[ "${CI_SSM_MODE:-0}" -eq 0 ]]; then
-  if [[ -z "${AWS_ACCESS_KEY_ID:-}" || -z "${AWS_SECRET_ACCESS_KEY:-}" ]] && ! aws configure get aws_access_key_id &>/dev/null; then
-    skip "Skipping upload, no AWS credentials found."
-  fi
+# Any source counts: the environment, a profile, or a build instance's instance profile.
+if ! aws configure export-credentials &>/dev/null; then
+  skip "Skipping upload, no AWS credentials found."
 fi
 if [ -z "${S3_FORCE_UPLOAD:-}" ] && \
   aws ${S3_BUILD_CACHE_AWS_PARAMS:-} s3 ls "s3://aztec-ci-artifacts/build-cache/$name" &>/dev/null; then
