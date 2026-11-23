@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# What ssm_send_command reports when the remote script fails. A stub aws runs the command SSM would run,
+# locally, and reports its result the way get-command-invocation does, including the 24,000-character cap
+# on each output stream.
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+passed=0
+failed=0
+pass() { echo -e "  \033[32m✓ $1\033[0m"; ((++passed)); }
+fail() { echo -e "  \033[31m✗ $1\033[0m"; ((++failed)); }
+
+mkdir "$tmp/bin"
+cat >"$tmp/bin/aws" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+state=$STUB_STATE
+case "$1 $2" in
+  "ssm send-command")
+    while [ $# -gt 0 ]; do [ "$1" = --parameters ] && params=$2; shift; done
+    cmd=$(jq -r '.commands[0]' <<<"$params")
+    set +e
+    bash -c "$cmd" >"$state/stdout" 2>"$state/stderr"
+    echo $? >"$state/code"
+    echo cmd-1
+    ;;
+  "ssm get-command-invocation")
+    code=$(cat "$state/code")
+    jq -n --arg out "$(head -c 24000 "$state/stdout")" --arg err "$(head -c 24000 "$state/stderr")" --argjson code "$code" \
+      '{Status: (if $code == 0 then "Success" else "Failed" end), StatusDetails: (if $code == 0 then "Success" else "Failed" end),
+        ResponseCode: $code, StandardOutputContent: $out, StandardErrorContent: $err}'
+    ;;
+  *) echo "unexpected aws call: $*" >&2; exit 1 ;;
+esac
+STUB
+chmod +x "$tmp/bin/aws"
+
+function run {
+  mkdir -p "$tmp/state"
+  PATH="$tmp/bin:$PATH" STUB_STATE="$tmp/state" "$script_dir/internal/ssm_send_command" i-test "$1" 2>&1 >/dev/null || echo "exit=$?"
+}
+
+out=$(run 'echo "E: Unable to locate package nosuchpkg"; exit 100')
+if [[ "$out" == *"Unable to locate package nosuchpkg"* && "$out" == *"exit=100"* ]]; then
+  pass "shows a failure reported on stdout, and exits with its code"
+else
+  fail "a failure reported on stdout: $out"
+fi
+
+out=$(run 'for i in $(seq 5000); do echo "noise line $i" >&2; done; echo "the real error" >&2; exit 2')
+if [[ "$out" == *"the real error"* ]]; then
+  pass "shows the end of a failing script's output, past the first 24,000 characters"
+else
+  fail "the end of a long output was not shown: $(tail -3 <<<"$out")"
+fi
+
+out=$(run 'echo "all good"; echo "progress" >&2')
+if [[ -z "$(grep -v '^SSM command .* sent to' <<<"$out")" ]]; then
+  pass "prints nothing beyond the send line on success"
+else
+  fail "printed output on success: $out"
+fi
+
+echo
+echo "$passed passed, $failed failed."
+[ "$failed" -eq 0 ]

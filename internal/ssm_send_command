@@ -15,8 +15,9 @@
 #
 # Behaviour:
 #   1. Base64-encodes the script and sends it via AWS-RunShellScript.
-#   2. Polls get-command-invocation every 5s, printing stdout/stderr as it arrives.
-#   3. Exits with the remote command's exit code.
+#   2. Polls get-command-invocation every 5s until the command finishes.
+#   3. On failure, prints the last lines of the script's combined stdout and stderr.
+#   4. Exits with the remote command's exit code.
 
 set -euo pipefail
 
@@ -40,7 +41,10 @@ encoded=$(printf '%s' "$script" | base64 -w 0 2>/dev/null || printf '%s' "$scrip
 # Build the shell command that SSM will execute on the instance:
 #   1. Decode the base64 payload into a temp file
 #   2. Optionally wrap with runuser if SSM_RUN_AS is set
-#   3. Execute it with bash
+#   3. Execute it with bash, its output going to a file on the instance
+#   4. On failure, write the end of that output to stderr
+# SSM keeps only the first 24,000 characters of each stream, so a script's own output would push the
+# error that ended it out of what SSM returns. Only the tail reaches SSM, under that cap.
 if [ -n "${SSM_RUN_AS:-}" ]; then
   run_prefix="runuser -u $SSM_RUN_AS -- "
 else
@@ -54,7 +58,7 @@ SSM_POLL_TIMEOUT=${SSM_POLL_TIMEOUT:-7200}
 exec_timeout=${SSM_EXEC_TIMEOUT:-$SSM_POLL_TIMEOUT}
 
 ssm_params=$(jq -n --arg e "$encoded" --arg p "$run_prefix" --arg t "$exec_timeout" \
-  '{commands: ["f=$(mktemp /tmp/ssm_cmd.XXXXXX); echo " + ($e | @json) + " | base64 -d > $f; chmod 644 $f; " + $p + "bash $f; ret=$?; rm -f $f; exit $ret"], executionTimeout: [$t]}')
+  '{commands: ["f=$(mktemp /tmp/ssm_cmd.XXXXXX); log=$(mktemp /tmp/ssm_out.XXXXXX); echo " + ($e | @json) + " | base64 -d > $f; chmod 644 $f; " + $p + "bash $f > $log 2>&1 < /dev/null; ret=$?; [ $ret -eq 0 ] || tail -n 100 $log | tail -c 20000 >&2; rm -f $f $log; exit $ret"], executionTimeout: [$t]}')
 
 command_id=$(aws ssm send-command \
   --region "$region" \
@@ -108,8 +112,7 @@ while true; do
     --instance-id "$iid" \
     --output json 2>/dev/null || echo '{}')
 
-  # SSM output is a truncated 24KB snapshot; real logs go to cache_log/S3.
-  # We only need the status to know when the command finishes.
+  # The script's output stays on the instance until it fails (see above); here we only need the status.
   status=$(printf '%s' "$inv" | jq -r '.Status // "Unknown"')
 
   case "$status" in
@@ -144,8 +147,8 @@ if [ "$status" != "Success" ] || [ "$exit_code" != "0" ]; then
   stderr_content=$(printf '%s' "$inv" | jq -r '.StandardErrorContent // empty')
   echo "SSM command $command_id did not succeed on instance $iid: status=$status, statusDetails=${status_details:-none}, responseCode=$exit_code." >&2
   if [ -n "$stderr_content" ]; then
-    echo "SSM stderr tail:" >&2
-    printf '%s\n' "$stderr_content" | tail -40 >&2
+    echo "Last lines of its output:" >&2
+    printf '%s\n' "$stderr_content" >&2
   fi
 fi
 exit "$exit_code"
