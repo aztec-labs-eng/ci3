@@ -5,6 +5,7 @@
 
 NO_CD=1 source $(dirname "${BASH_SOURCE[0]}")/source
 source $ci3/internal/source_refname
+source $ci3/internal/source_shutdown_timer
 
 cmd=${1:?usage: $(basename "$0") '<command-to-run-inside-devbox>'}
 # The repository being built, and the checkout directory named after it. ci3 is shared by
@@ -253,9 +254,19 @@ for pass_env_name in ${CI3_PASS_ENV:-}; do
   pass_env_args+=" -e $pass_env_name=$(printf %q "${!pass_env_name:-}")"
 done
 
+# The first thing the build does on the instance is set its own shutdown timer (AWS_SHUTDOWN_TIME), so
+# the build never runs on the short boot timer. Provisioning has already done this once; doing it again
+# here makes sure of it. See internal/source_shutdown_timer.
+shutdown_timer_cmd=""
+if [ "$NO_TERMINATE" -ne 1 ]; then
+  shutdown_timer_cmd=$(claim_shutdown_or_fail "$AWS_SHUTDOWN_TIME")
+fi
+
 host_script=$(
   cat <<EOF
 set -euo pipefail
+
+$shutdown_timer_cmd
 
 # This runtime guard should be baked into the build image. Unattended upgrades
 # can restart SSM while CI is running, leaving SSM commands stuck InProgress.

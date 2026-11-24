@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 source $(dirname "${BASH_SOURCE[0]}")/../source
+source $(dirname "${BASH_SOURCE[0]}")/source_shutdown_timer
 
 name=$1
 ami=$2
@@ -13,6 +14,16 @@ spec_path=$state_dir/lt_data.json
 iid_path=$state_dir/iid
 ip_path=$state_dir/ip
 lt_path=$state_dir/launch_template_id
+launch_id_path=$state_dir/launch_id
+
+# Minutes an instance lives after boot if nobody claims it (see source_shutdown_timer). It must be longer
+# than provisioning can take before the claim lands: up to 300 s waiting for SSM, then up to three claim
+# attempts of 60 s each, 5 s apart, about 8 minutes in all.
+AWS_BOOT_SHUTDOWN_TIME=${AWS_BOOT_SHUTDOWN_TIME:-15}
+if ! [[ "$AWS_BOOT_SHUTDOWN_TIME" =~ ^[0-9]+$ ]] || [ "$AWS_BOOT_SHUTDOWN_TIME" -lt 10 ]; then
+  echo_stderr "AWS_BOOT_SHUTDOWN_TIME must be a whole number of minutes, at least 10: $AWS_BOOT_SHUTDOWN_TIME"
+  exit 1
+fi
 
 export AWS_DEFAULT_REGION=us-east-2
 
@@ -56,8 +67,13 @@ if [ "${#subnets[@]}" -eq 0 ]; then
   exit 1
 fi
 
+# An id unique to this request. It names the launch template and is tagged on the instance as CI3LaunchId,
+# so aws_terminate_instance can find the instance even if its instance id never came back to us. The name
+# part is cut to 96 characters to keep the whole within the 128-character launch template name limit.
+launch_id="ci3-${name:0:96}-$$-$(date +%s)-$RANDOM"
+
 # Instance tags, applied at launch via the launch template (propagate to fleet instances).
-tags_json="{\"Key\":\"Name\",\"Value\":\"$name\"},{\"Key\":\"Group\",\"Value\":\"build-instance\"}"
+tags_json="{\"Key\":\"Name\",\"Value\":\"$name\"},{\"Key\":\"Group\",\"Value\":\"build-instance\"},{\"Key\":\"CI3LaunchId\",\"Value\":\"$launch_id\"}"
 [ -n "${GITHUB_ACTOR:-}" ] && tags_json+=",{\"Key\":\"GithubActor\",\"Value\":\"${GITHUB_ACTOR//[\[\]]/}\"}"
 [ -n "${CI_MODE:-}" ] && tags_json+=",{\"Key\":\"CICommand\",\"Value\":\"$CI_MODE\"}"
 [ -n "${CI_DASHBOARD:-}" ] && tags_json+=",{\"Key\":\"Dashboard\",\"Value\":\"$CI_DASHBOARD\"}"
@@ -72,10 +88,24 @@ if [ "${UNSAFE_AWS_KEEP_ALIVE:-0}" -eq 1 ]; then
   tags_json+=",{\"Key\":\"Keep-Alive\",\"Value\":\"true\"}"
 fi
 
+# Add the boot timer (as user data), and make the instance terminate rather than stop when it shuts
+# itself down, so a timed-out instance stops costing anything, its volume included. NO_TERMINATE
+# instances are meant to stay up, so they get neither. AWS_SHUTDOWN_TERMINATES=0 keeps the timer but
+# leaves shutdown as stop, for callers that power the instance down on purpose (aws/ami_update.sh images it).
+lifetime_json=""
+if [ "${NO_TERMINATE:-0}" -ne 1 ]; then
+  user_data=$(boot_shutdown_script "$AWS_BOOT_SHUTDOWN_TIME" | base64 -w 0)
+  lifetime_json="\"UserData\": \"$user_data\","
+  if [ "${AWS_SHUTDOWN_TERMINATES:-1}" -eq 1 ]; then
+    lifetime_json+=" \"InstanceInitiatedShutdownBehavior\": \"terminate\","
+  fi
+fi
+
 # Common launch config shared by every pool. Sizes/AZs vary per fleet override.
 lt_data=$(cat <<EOF
 {
   "ImageId": "$ami",
+  $lifetime_json
   "IamInstanceProfile": { "Name": "$CI3_INSTANCE_PROFILE_NAME" },
   "SecurityGroupIds": ["$sg_id"],
   "BlockDeviceMappings": [
@@ -98,7 +128,7 @@ EOF
 )
 echo "$lt_data" > "$spec_path"
 
-lt_name="ci3-${name}-$$-$(date +%s)"
+lt_name=$launch_id
 lt_id=$(aws ec2 create-launch-template \
   --launch-template-name "$lt_name" \
   --launch-template-data "$lt_data" \
@@ -147,6 +177,9 @@ if [ "${NO_SPOT:-0}" -ne 1 ]; then
   SECONDS=0
   while true; do
     echo "Requesting spot fleet $info ($spot_strategy, ${spot_timeout}s budget)..."
+    # Record the launch id just before asking for an instance: from this point an instance can exist
+    # whose id we do not know yet, and aws_terminate_instance uses this file to look for it.
+    echo "$launch_id" > "$launch_id_path"
     resp=$(aws ec2 create-fleet \
       --type instant \
       --target-capacity-specification "TotalTargetCapacity=1,DefaultTargetCapacityType=spot" \
@@ -176,6 +209,8 @@ if [ -z "$iid" ]; then
   SECONDS=0
   while true; do
     echo "Requesting on-demand fleet $info ($ondemand_strategy)..."
+    # As for spot above.
+    echo "$launch_id" > "$launch_id_path"
     resp=$(aws ec2 create-fleet \
       --type instant \
       --target-capacity-specification "TotalTargetCapacity=1,DefaultTargetCapacityType=on-demand" \
@@ -244,9 +279,23 @@ if [ "$ssm_status" != "Online" ]; then
   exit 1
 fi
 
-# Fire-and-forget. Non-fatal: a failed timer shouldn't abort provisioning (reaper catches orphans).
+# Claim the instance: replace the boot timer with the caller's AWS_SHUTDOWN_TIME (see source_shutdown_timer).
+# Callers go on to run long jobs, and an unclaimed instance shuts down when the boot timer runs out, so a
+# claim that fails is fatal: the instance is terminated and provisioning fails. One failed SSM command
+# should not cost a run, so it tries three times first.
 if [ "${NO_TERMINATE:-0}" -ne 1 ]; then
   >&2 echo "Setting shutdown timer (+${AWS_SHUTDOWN_TIME:-60} min) via SSM..."
-  SSM_NO_WAIT=1 ssm_send_command "$iid" "sudo shutdown -h +${AWS_SHUTDOWN_TIME:-60}" || \
-    >&2 echo "Warning: failed to set shutdown timer via SSM (non-fatal)."
+  claimed=0
+  for attempt in 1 2 3; do
+    if SSM_POLL_TIMEOUT=60 ssm_send_command "$iid" "$(claim_shutdown_cmd "${AWS_SHUTDOWN_TIME:-60}")" >&2; then
+      claimed=1
+      break
+    fi
+    [ "$attempt" -lt 3 ] && { >&2 echo "Setting the shutdown timer failed; retrying..."; sleep 5; }
+  done
+  if [ "$claimed" -ne 1 ]; then
+    >&2 echo "Could not set the shutdown timer on $iid; terminating it."
+    aws ec2 terminate-instances --instance-ids "$iid" >/dev/null 2>&1 || true
+    exit 1
+  fi
 fi

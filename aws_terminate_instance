@@ -10,8 +10,25 @@ fi
 
 iid=$(cat $state_path/iid 2>/dev/null || true)
 sir=$(cat $state_path/sir 2>/dev/null || true)
+launch_id=$(cat $state_path/launch_id 2>/dev/null || true)
 
 export AWS_DEFAULT_REGION=us-east-2
+
+# A fleet was requested (there is a launch id) but no instance id was recorded. Usually no instance was
+# started, for example when there was no capacity. But if the launch was interrupted while create-fleet
+# was running, AWS may have started one whose id never came back to us. Look for it by its CI3LaunchId
+# tag (set in aws_request_instance_type). A just-launched instance can take a moment to show up, so look
+# up to three times, two seconds apart.
+if [ -z "$iid" ] && [ -n "$launch_id" ]; then
+    for attempt in 1 2 3; do
+        iid=$(aws ec2 describe-instances \
+            --filters "Name=tag:CI3LaunchId,Values=$launch_id" "Name=instance-state-name,Values=pending,running" \
+            --query "Reservations[].Instances[].InstanceId" --output text 2>/dev/null | tr '\n\t' '  ' | xargs || true)
+        [ -n "$iid" ] && [ "$iid" != None ] && break
+        iid=""
+        [ "$attempt" -lt 3 ] && sleep 2
+    done
+fi
 
 if [ -n "$iid" ]; then
     echo "Terminating instance: $iid..."

@@ -1,0 +1,256 @@
+#!/usr/bin/env bash
+# What bounds a build instance's lifetime when the process that launched it dies. A stub aws records the
+# calls and returns canned replies; no request reaches AWS.
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+passed=0
+failed=0
+pass() { echo -e "  \033[32m✓ $1\033[0m"; ((++passed)); }
+fail() { echo -e "  \033[31m✗ $1\033[0m"; ((++failed)); }
+
+# In case the stub were ever bypassed: no credentials, including from instance metadata on EC2.
+unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_PROFILE AWS_WEB_IDENTITY_TOKEN_FILE AWS_ROLE_ARN \
+  AWS_CONTAINER_CREDENTIALS_RELATIVE_URI AWS_CONTAINER_CREDENTIALS_FULL_URI
+export AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null AWS_EC2_METADATA_DISABLED=true
+# Settings the scripts read, so the caller's environment cannot change the results.
+unset NO_TERMINATE NO_SPOT KEY_NAME AWS_SHUTDOWN_TIME AWS_BOOT_SHUTDOWN_TIME AWS_SHUTDOWN_TERMINATES CI3_TIMER_DIR
+# ci3's source puts ~/.local/aztec-dev-bin on PATH ahead of the stub. Refuse to run if an aws is there.
+if [ -e "$HOME/.local/aztec-dev-bin/aws" ]; then
+  echo "Refusing to run: $HOME/.local/aztec-dev-bin/aws would be used instead of the stub." >&2
+  exit 1
+fi
+export GITHUB_REPOSITORY=example/repo
+
+mkdir "$tmp/bin"
+cat >"$tmp/bin/aws" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+state=$STUB_STATE
+echo "$*" >>"$state/calls"
+arg() { local want=$1; shift; while [ $# -gt 0 ]; do [ "$1" = "$want" ] && { echo "$2"; return; }; shift; done; }
+case "$1 $2" in
+  "ec2 describe-security-groups") echo vpc-test ;;
+  "ec2 describe-subnets") printf 'us-east-2a\tsubnet-a\n' ;;
+  "ec2 create-launch-template")
+    arg --launch-template-data "$@" >"$state/lt_data.json"
+    arg --launch-template-name "$@" >"$state/lt_name"
+    echo lt-test ;;
+  "ec2 delete-launch-template") ;;
+  "ec2 create-fleet") echo '{"Instances":[{"InstanceIds":["i-launched"],"InstanceType":"m7i.32xlarge"}]}' ;;
+  "ec2 describe-instances")
+    if [[ "$*" == *"tag:CI3LaunchId"* ]]; then cat "$state/tagged_instance" 2>/dev/null || true
+    else echo 10.0.0.1; fi ;;
+  "ssm describe-instance-information") echo Online ;;
+  "ssm send-command")
+    # The script ssm_send_command sends, decoded from its base64 wrapper.
+    arg --parameters "$@" | jq -r '.commands[0]' | grep -o 'echo "[A-Za-z0-9+/=]*"' | head -1 \
+      | sed 's/^echo "//; s/"$//' | base64 -d >>"$state/ssm_scripts"
+    echo cmd-1 ;;
+  "ssm get-command-invocation")
+    if [ -n "${STUB_SSM_FAILS:-}" ]; then
+      echo '{"Status":"Failed","StatusDetails":"Failed","ResponseCode":1,"StandardOutputContent":"","StandardErrorContent":"failed"}'
+    else
+      echo '{"Status":"Success","StatusDetails":"Success","ResponseCode":0,"StandardOutputContent":"","StandardErrorContent":""}'
+    fi ;;
+  "ec2 terminate-instances") ;;
+  *) echo "unexpected aws call: $*" >&2; exit 1 ;;
+esac
+STUB
+chmod +x "$tmp/bin/aws"
+
+# Usage: request [VAR=value ...] [-- name]. Runs aws_request_instance_type against the stub; its output
+# goes to $tmp/request.log and its exit code to $request_exit.
+function request {
+  local name=test_instance envs=()
+  while [ $# -gt 0 ]; do
+    [ "$1" = -- ] && { name=$2; break; }
+    envs+=("$1"); shift
+  done
+  rm -rf "$tmp/state" "$tmp/req"
+  mkdir -p "$tmp/state" "$tmp/req"
+  touch "$tmp/state/calls" "$tmp/state/ssm_scripts"
+  request_exit=0
+  env PATH="$tmp/bin:$PATH" STUB_STATE="$tmp/state" FLEET_OVERRIDES="m7i.32xlarge:1" "${envs[@]}" \
+    "$script_dir/internal/aws_request_instance_type" "$name" ami-test "$tmp/req" >"$tmp/request.log" 2>&1 \
+    || request_exit=$?
+}
+function request_failed { echo "request failed ($request_exit): $(tail -5 "$tmp/request.log")"; }
+
+# --- boot timer and claim ---
+request
+if [ "$request_exit" -ne 0 ]; then
+  fail "launch with defaults: $(request_failed)"
+else
+  user_data=$(jq -r '.UserData // empty' "$tmp/state/lt_data.json" | base64 -d)
+  if [[ "$user_data" == *"shutdown -h +15"* && "$user_data" == *"ci3-claimed"* ]]; then
+    pass "the instance arms a 15-minute shutdown timer at boot, unless already claimed"
+  else
+    fail "no guarded boot shutdown timer in user data: '$user_data'"
+  fi
+  if [ "$(jq -r '.InstanceInitiatedShutdownBehavior' "$tmp/state/lt_data.json")" = terminate ]; then
+    pass "a shutdown the instance starts terminates it"
+  else
+    fail "InstanceInitiatedShutdownBehavior is not terminate"
+  fi
+  launch_id=$(cat "$tmp/req/launch_id")
+  if jq -e --arg id "$launch_id" '.TagSpecifications[] | select(.ResourceType == "instance") | .Tags[]
+      | select(.Key == "CI3LaunchId" and .Value == $id)' "$tmp/state/lt_data.json" >/dev/null; then
+    pass "the instance is tagged with the request's unique launch id"
+  else
+    fail "no CI3LaunchId tag matching $launch_id"
+  fi
+  if grep -q 'shutdown -h +60 && touch "/run/ci3-claimed"' "$tmp/state/ssm_scripts"; then
+    pass "provisioning claims the instance with the caller's 60-minute timer"
+  else
+    fail "provisioning did not send the claim: '$(cat "$tmp/state/ssm_scripts")'"
+  fi
+fi
+
+request STUB_SSM_FAILS=1
+if [ "$request_exit" -ne 0 ] && [ "$(grep -c 'ssm send-command' "$tmp/state/calls")" -eq 3 ] \
+    && grep -q 'terminate-instances --instance-ids i-launched' "$tmp/state/calls"; then
+  pass "a claim that fails three times terminates the instance and fails provisioning"
+else
+  fail "failed claim: exit $request_exit, calls: $(grep -E 'send-command|terminate' "$tmp/state/calls" | cut -c1-60)"
+fi
+
+request AWS_SHUTDOWN_TERMINATES=0
+if [ "$request_exit" -eq 0 ] && [ -n "$(jq -r '.UserData // empty' "$tmp/state/lt_data.json")" ] \
+    && [ -z "$(jq -r '.InstanceInitiatedShutdownBehavior // empty' "$tmp/state/lt_data.json")" ]; then
+  pass "AWS_SHUTDOWN_TERMINATES=0 keeps the boot timer but leaves shutdown as stop"
+else
+  fail "AWS_SHUTDOWN_TERMINATES=0: $(request_failed)"
+fi
+
+request NO_TERMINATE=1
+if [ "$request_exit" -ne 0 ]; then
+  fail "launch with NO_TERMINATE: $(request_failed)"
+elif [ -z "$(jq -r '.UserData // .InstanceInitiatedShutdownBehavior // empty' "$tmp/state/lt_data.json")" ] \
+    && ! grep -q 'send-command' "$tmp/state/calls"; then
+  pass "NO_TERMINATE instances get no timer at boot or provisioning, and keep stop-on-shutdown"
+else
+  fail "NO_TERMINATE instance has a timer or terminate-on-shutdown"
+fi
+
+request AWS_BOOT_SHUTDOWN_TIME=0
+if [ "$request_exit" -ne 0 ] && ! grep -q 'create-fleet' "$tmp/state/calls" && [ ! -e "$tmp/req/launch_id" ]; then
+  pass "a boot timer under 10 minutes is refused before anything is launched"
+else
+  fail "AWS_BOOT_SHUTDOWN_TIME=0 was accepted"
+fi
+
+request -- "$(printf 'x%.0s' {1..200})"
+lt_name=$(cat "$tmp/state/lt_name" 2>/dev/null || true)
+if [ "$request_exit" -eq 0 ] && [ -n "$lt_name" ] && [ "${#lt_name}" -le 128 ]; then
+  pass "a 200-character instance name still gives a launch template name within 128 characters"
+else
+  fail "launch template name for a long instance name: ${#lt_name} characters ($(request_failed))"
+fi
+
+# --- the boot timer never replaces a claim ---
+# Runs the real boot script and claim commands with stub sudo and shutdown; the stub shutdown records the
+# timer it was given, or fails when $SHUTDOWN_FAILS is set.
+mkdir -p "$tmp/tbin"
+printf '#!/bin/sh\n[ -z "$SHUTDOWN_FAILS" ] || exit 1\necho "$2" > "$TIMER_LOG"\n' >"$tmp/tbin/shutdown"
+printf '#!/bin/sh\nexec "$@"\n' >"$tmp/tbin/sudo"
+chmod +x "$tmp/tbin/shutdown" "$tmp/tbin/sudo"
+# Usage: on_instance <dir> <command...>. Runs with the stubs first on PATH and the lock and marker in <dir>.
+function on_instance {
+  local dir=$1; shift
+  ( export CI3_TIMER_DIR=$dir PATH="$tmp/tbin:$PATH" TIMER_LOG=$dir/scheduled
+    source "$script_dir/internal/source_shutdown_timer"
+    "$@" )
+}
+function timer_after {  # timer_after boot|claim boot|claim
+  local dir=$tmp/run_$1_$2
+  rm -rf "$dir"; mkdir -p "$dir"
+  for step in "$1" "$2"; do
+    if [ "$step" = boot ]; then on_instance "$dir" eval 'boot_shutdown_script 15 | sh'
+    else on_instance "$dir" eval 'bash -c "$(claim_shutdown_cmd 60)"'; fi
+  done
+  cat "$dir/scheduled"
+}
+if [ "$(PATH="$tmp/tbin:$PATH" command -v shutdown)" != "$tmp/tbin/shutdown" ] || \
+   [ "$(PATH="$tmp/tbin:$PATH" command -v sudo)" != "$tmp/tbin/sudo" ] || ! command -v flock >/dev/null; then
+  fail "cannot run the timer checks safely here (stub shutdown/sudo not first on PATH, or no flock)"
+else
+  if [ "$(timer_after boot claim)" = +60 ] && [ "$(timer_after claim boot)" = +60 ]; then
+    pass "the claim's timer holds whether the boot script runs before or after it"
+  else
+    fail "boot then claim: $(timer_after boot claim); claim then boot: $(timer_after claim boot)"
+  fi
+
+  dir=$tmp/run_failed_claim; mkdir -p "$dir"
+  SHUTDOWN_FAILS=1 on_instance "$dir" eval 'bash -c "$(claim_shutdown_cmd 60)"' >/dev/null 2>&1 || true
+  on_instance "$dir" eval 'boot_shutdown_script 15 | sh'
+  if [ ! -e "$dir/ci3-claimed" ] && [ "$(cat "$dir/scheduled")" = +15 ]; then
+    pass "a failed claim leaves no marker, so the boot timer still applies"
+  else
+    fail "after a failed claim: marker $( [ -e "$dir/ci3-claimed" ] && echo present || echo absent ), timer $(cat "$dir/scheduled" 2>/dev/null)"
+  fi
+
+  # The line bootstrap_ec2 puts at the top of its build script, run as a script.
+  dir=$tmp/run_host; mkdir -p "$dir"
+  if on_instance "$dir" eval 'bash -c "set -euo pipefail; $(claim_shutdown_or_fail 75); echo after"' 2>/dev/null | grep -q after \
+      && [ "$(cat "$dir/scheduled")" = +75 ]; then
+    host_ok=1
+  else
+    host_ok=0
+  fi
+  out=$(SHUTDOWN_FAILS=1 on_instance "$dir" eval 'bash -c "set -euo pipefail; $(claim_shutdown_or_fail 75); echo after"' 2>&1 || true)
+  if [ "$host_ok" -eq 1 ] && [[ "$out" == *"could not set the shutdown timer"* && "$out" != *after* ]] \
+      && grep -q 'claim_shutdown_or_fail "$AWS_SHUTDOWN_TIME"' "$script_dir/bootstrap_ec2"; then
+    pass "the build-script claim line sets the timer or stops the script, and bootstrap_ec2 uses it"
+  else
+    fail "build script claim: host_ok=$host_ok, on failure: $out"
+  fi
+fi
+
+# --- terminating an instance whose id never came back ---
+# Usage: terminate [tagged-instance-id ...]. The request state ($tmp/req) is set up by the caller.
+function terminate {
+  rm -rf "$tmp/state"
+  mkdir -p "$tmp/state"
+  touch "$tmp/state/calls"
+  [ $# -gt 0 ] && printf '%s\n' "$@" >"$tmp/state/tagged_instance"
+  PATH="$tmp/bin:$PATH" STUB_STATE="$tmp/state" "$script_dir/aws_terminate_instance" "$tmp/req" >/dev/null 2>&1
+}
+
+rm -rf "$tmp/req"; mkdir -p "$tmp/req"; echo ci3-test-launch >"$tmp/req/launch_id"
+terminate i-orphan
+if grep -q 'terminate-instances --instance-ids i-orphan' "$tmp/state/calls"; then
+  pass "an instance with no recorded id is found by its launch tag and terminated"
+else
+  fail "the tagged instance was not terminated: $(cat "$tmp/state/calls")"
+fi
+
+rm -rf "$tmp/req"; mkdir -p "$tmp/req"; echo ci3-test-launch >"$tmp/req/launch_id"
+terminate i-one i-two
+if grep -q 'terminate-instances --instance-ids i-one i-two' "$tmp/state/calls"; then
+  pass "several tagged instances, one per line, are terminated in one call"
+else
+  fail "several tagged instances: $(cat "$tmp/state/calls")"
+fi
+
+rm -rf "$tmp/req"; mkdir -p "$tmp/req"; echo i-known >"$tmp/req/iid"; echo ci3-test-launch >"$tmp/req/launch_id"
+terminate
+if grep -q 'terminate-instances --instance-ids i-known' "$tmp/state/calls" && ! grep -q 'tag:CI3LaunchId' "$tmp/state/calls"; then
+  pass "a recorded id is terminated directly, with no tag lookup"
+else
+  fail "recorded id path: $(cat "$tmp/state/calls")"
+fi
+
+rm -rf "$tmp/req"; mkdir -p "$tmp/req"; echo ci3-test-launch >"$tmp/req/launch_id"
+terminate
+if ! grep -q 'terminate-instances' "$tmp/state/calls" && [ "$(grep -c 'tag:CI3LaunchId' "$tmp/state/calls")" -eq 3 ]; then
+  pass "when no instance appears, it looks three times and terminates nothing"
+else
+  fail "no-instance path: $(cat "$tmp/state/calls")"
+fi
+
+echo
+echo "$passed passed, $failed failed."
+[ "$failed" -eq 0 ]

@@ -28,7 +28,9 @@ esac
 # Request new instance (ami: ubuntu 24.04 LTS). Like a build instance, it has no key pair and is driven over SSM.
 state_dir=$(mktemp -d /tmp/aws_request_instance.XXXXXX)
 trap on_exit EXIT
-AMI=$ami aws_request_instance ami_update_$arch 4 $arch $state_dir
+# create-image below reboots the instance to image it. That reboot comes from EC2, so terminate-on-shutdown
+# probably would not apply, but keep shutdown as stop here as a precaution.
+AMI=$ami AWS_SHUTDOWN_TERMINATES=0 aws_request_instance ami_update_$arch 4 $arch $state_dir
 iid=$(cat $state_dir/iid | tr -d '\n\r' | xargs)
 
 echo "Instance id: $iid"

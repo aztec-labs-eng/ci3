@@ -1,0 +1,43 @@
+# Shutdown timers on build instances.
+#
+# Every build instance should shut itself down eventually, even if whatever launched it has died. This
+# works in two steps:
+#   1. Boot timer. When the instance boots, its user data (run by cloud-init) sets a short timer,
+#      `shutdown -h +15` by default. An instance that nobody goes on to use is gone in 15 minutes.
+#   2. Claim. Whoever uses the instance replaces that timer with a longer one, long enough for its job.
+#      aws_request_instance_type claims the instance once SSM is online, and bootstrap_ec2 claims it
+#      again at the start of the build.
+#
+# On the instance, a later `shutdown -h +N` replaces any earlier one. Boot is not guaranteed to finish
+# before the first SSM command arrives, so a slow boot script could replace a claim with the 15-minute
+# timer and kill the build. To prevent that:
+#   - The boot script and the claim both run under one lock (flock), so they never interleave.
+#   - A claim leaves a marker file once its timer is set, and the boot script does nothing if the marker
+#     exists.
+# So whichever runs first, the claim's timer is the one that stays.
+
+# Directory for the lock and the marker on the instance. /run is emptied at every boot, so a marker never
+# survives a reboot. Tests override this to run the commands locally; nothing else should.
+CI3_TIMER_DIR=${CI3_TIMER_DIR:-/run}
+
+# Prints the user-data script for the boot timer ($1 minutes). Under the lock, it sets the timer only if
+# no claim has been made yet.
+function boot_shutdown_script {
+  cat <<SCRIPT
+#!/bin/sh
+flock "$CI3_TIMER_DIR/ci3-timer.lock" sh -c '[ -e "$CI3_TIMER_DIR/ci3-claimed" ] || shutdown -h +$1'
+SCRIPT
+}
+
+# Prints the command that claims the instance with a $1-minute timer. Under the lock, it sets the timer
+# and then writes the marker. The marker is written only if the timer was set, so a failed claim leaves
+# the boot timer in place rather than no timer at all.
+function claim_shutdown_cmd {
+  echo "sudo flock \"$CI3_TIMER_DIR/ci3-timer.lock\" sh -c 'shutdown -h +$1 && touch \"$CI3_TIMER_DIR/ci3-claimed\"'"
+}
+
+# Prints a script line that claims the instance with a $1-minute timer, and stops the script with an
+# error if it cannot.
+function claim_shutdown_or_fail {
+  echo "$(claim_shutdown_cmd "$1") || { echo 'HOST: could not set the shutdown timer.' >&2; exit 1; }"
+}
