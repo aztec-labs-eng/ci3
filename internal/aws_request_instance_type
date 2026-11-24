@@ -61,6 +61,12 @@ tags_json="{\"Key\":\"Name\",\"Value\":\"$name\"},{\"Key\":\"Group\",\"Value\":\
 [ -n "${GITHUB_ACTOR:-}" ] && tags_json+=",{\"Key\":\"GithubActor\",\"Value\":\"${GITHUB_ACTOR//[\[\]]/}\"}"
 [ -n "${CI_MODE:-}" ] && tags_json+=",{\"Key\":\"CICommand\",\"Value\":\"$CI_MODE\"}"
 [ -n "${CI_DASHBOARD:-}" ] && tags_json+=",{\"Key\":\"Dashboard\",\"Value\":\"$CI_DASHBOARD\"}"
+# Repo is the cost allocation tag that splits the shared account's EC2 and EBS bill by repository.
+# Lowercased: CI's GITHUB_REPOSITORY and a local checkout's origin url can differ in case, and a
+# cost allocation tag groups by exact value.
+repo=$(github_repo)
+repo=${repo,,}
+[ -n "$repo" ] && tags_json+=",{\"Key\":\"Repo\",\"Value\":\"$repo\"}"
 if [ "${UNSAFE_AWS_KEEP_ALIVE:-0}" -eq 1 ]; then
   echo_stderr "You have set UNSAFE_AWS_KEEP_ALIVE=1, so the instance will not be terminated after 1.5 hours by the reaper script. Make sure you shut the machine down when done."
   tags_json+=",{\"Key\":\"Keep-Alive\",\"Value\":\"true\"}"
@@ -84,7 +90,8 @@ lt_data=$(cat <<EOF
     }
   ],
   "TagSpecifications": [
-    { "ResourceType": "instance", "Tags": [ $tags_json ] }
+    { "ResourceType": "instance", "Tags": [ $tags_json ] },
+    { "ResourceType": "volume", "Tags": [ $tags_json ] }
   ]
 }
 EOF
