@@ -1,0 +1,114 @@
+# Launcher watchdog: a build instance shuts itself down when whatever launched it has gone.
+#
+# bootstrap_ec2 runs on a CI runner, starts a build on an EC2 instance and waits for the result. If the runner
+# side dies (the job is cancelled, the runner crashes, the job times out) nothing tells the instance, which
+# builds on with nobody waiting until its shutdown timer, an hour or more away. So the two sides keep in touch
+# through the Redis they already share:
+#
+#   1. Launcher (bootstrap_ec2, on the runner). It sets the key ci3-launcher-<CI_LOG_ID> with a 120 s expiry
+#      and refreshes it every 30 s for as long as it runs. If the launcher dies, the key expires.
+#   2. Build container (bootstrap_ec2's container script). It checks every 60 s whether the key exists. Once
+#      the key has been missing for 3 checks in a row, it writes a flag file to /tmp, which the container
+#      shares with the host.
+#   3. Host (bootstrap_ec2's host script). It sees the flag file and shuts the instance down.
+#
+# From the launcher dying to the flag file: up to 120 s for the key to expire, then up to 180 s of checks,
+# so about 5 minutes.
+#
+# Two rules keep this from killing a build whose launcher is alive:
+#   - The container does nothing until it has seen the key at least once. That proves both sides talk to the
+#     same Redis; if they did not, the key would look missing forever.
+#   - Only a clear "the key does not exist" reply counts as a miss. A Redis error, a timeout or any other
+#     reply tells us nothing, so it changes nothing.
+
+# Where the container leaves the flag for the host. /tmp on the host is mounted at /tmp in the container.
+CI3_LAUNCHER_GONE_FILE=/tmp/ci3-launcher-gone
+
+# The Redis key the launcher keeps alive, for a given CI_LOG_ID.
+function launcher_key {
+  echo "ci3-launcher-$1"
+}
+
+# Launcher side. Succeeds if this launch should use the watchdog.
+# - CI3_LAUNCHER_WATCHDOG=0 turns it off and =1 turns it on. Left unset, it is on only under GitHub Actions:
+#   someone launching from a laptop may close the lid and still expect the build to finish.
+# - Never with NO_TERMINATE, whose instances are meant to outlive their launcher.
+# - Never for a release (REF_NAME is a semver): a release should not be cut short by a runner hiccup.
+function launcher_watchdog_wanted {
+  case "${CI3_LAUNCHER_WATCHDOG:-}" in
+    0) return 1 ;;
+    1) ;;
+    *) [ "${GITHUB_ACTIONS:-}" = true ] || return 1 ;;
+  esac
+  [ "${NO_TERMINATE:-0}" != 1 ] || return 1
+  ! semver check "${REF_NAME:-}" &>/dev/null
+}
+
+# Launcher side. Sets the key $1 and starts a background loop that refreshes it, recording the loop's pid in
+# launcher_heartbeat_pid. Fails, starting nothing, if Redis is unavailable or the first write does not succeed:
+# then the container must not be told to watch, since it would never see the key.
+function start_launcher_heartbeat {
+  local key=$1
+  # The pid of the launcher itself ($$ is the main shell's pid, even inside the loop below).
+  local launcher_pid=$$
+  [ "${CI_REDIS_AVAILABLE:-0}" = 1 ] || return 1
+  # redis_cli hides redis-cli's exit code, so judge by the reply: SETEX answers OK, and nothing else will do.
+  [ "$(redis_cli SETEX "$key" 120 1 2>/dev/null)" = OK ] || return 1
+  # Refresh every 30 s, so a single slow or failed write (redis_cli gives up after 30 s) still leaves the key
+  # alive. The loop also stops by itself if the launcher is gone: normally cleanup kills it, but if the launcher
+  # was SIGKILLed and the loop somehow was not, it must not keep the key alive for a launcher that has gone.
+  # Its output goes nowhere, so it never holds open a pipe that a caller (parallel, the CI runner) waits on.
+  (
+    while sleep 30 && kill -0 "$launcher_pid" 2>/dev/null; do
+      redis_cli SETEX "$key" 120 1 &>/dev/null
+    done
+  ) </dev/null &>/dev/null &
+  launcher_heartbeat_pid=$!
+}
+
+# Launcher side. Stops the refresh loop, if one is running. Safe to call more than once, and harmless if the
+# loop has already died.
+function stop_launcher_heartbeat {
+  if [ -n "${launcher_heartbeat_pid:-}" ]; then
+    kill "$launcher_heartbeat_pid" 2>/dev/null || true
+    launcher_heartbeat_pid=
+  fi
+}
+
+# Container side. Usage: watch_launcher <interval-seconds> <miss-limit> <flag-file> <check-command...>
+# Runs the check command every <interval-seconds>. It should print 1 if the launcher's key exists and 0 if it
+# does not; anything else, or nothing, counts as an error. After <miss-limit> misses in a row, once the key has
+# been seen, it prints a line saying so, creates <flag-file> and returns. Otherwise it runs until killed.
+# The body is a subshell, so the caller's set -e cannot end the loop early, and its variables stay local.
+function watch_launcher() (
+  set +e
+  local interval=$1 miss_limit=$2 flag_file=$3
+  shift 3
+  # armed: the key has been seen at least once. misses: checks in a row since then that found it missing.
+  local armed=0 misses=0 reply
+  while true; do
+    reply=$("$@" 2>/dev/null)
+    case "$reply" in
+      1)
+        armed=1
+        misses=0
+        ;;
+      0)
+        if [ "$armed" = 1 ]; then
+          misses=$((misses + 1))
+        fi
+        ;;
+      *)
+        # An error, a timeout or an unexpected reply: we learned nothing, so count nothing.
+        ;;
+    esac
+    if [ "$misses" -ge "$miss_limit" ]; then
+      echo "LAUNCHER WATCHDOG: the process that launched this build has stopped checking in" \
+        "(missed $misses checks, ${interval}s apart). It has gone, so nobody is waiting for this build:" \
+        "shutting this instance down."
+      touch "$flag_file"
+      return 0
+    fi
+    sleep "$interval"
+  done
+)

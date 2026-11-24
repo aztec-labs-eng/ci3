@@ -126,11 +126,12 @@ The dependency runs both ways. ci3 reads these from the repository it is buildin
 - `scripts/process_flake_log.py` — optional; run by `parallelize` after a test run when present.
 - `build-images/src/home/.gitconfig` — mounted into containers by `docker_isolate`.
 - `CI3_EVENT_ENDPOINT`, `CI3_EVENT_TOKEN` and `CI3_EVENT_PROJECT` — optional; when all are set, `bootstrap_ec2` sends a `ci.instance` event per build instance through `send_event` to that OTLP endpoint, for example `https://otel.aztec-labs.com`.
+- `CI3_LAUNCHER_WATCHDOG` — optional; `bootstrap_ec2` has a build instance shut itself down a few minutes after its launcher has gone (see `internal/source_launcher_watchdog`). Unset, this is on under GitHub Actions only; `0` turns it off and `1` turns it on elsewhere. It is always off with `NO_TERMINATE=1` and for releases.
 
 ### State shared between versions
 
 A repository pins its own ci3, and a build can involve more than one pin: a repository and a
 submodule of it each use their own. What has to stay compatible across versions is therefore not
 the scripts but the state they share: redis key shapes (`ci-run-<org>/<repo>/<section>`,
-`history_*`, `hb-*`, the test cache), S3 log keys (`logs/<prefix>/<key>.log.gz`), build-cache
+`history_*`, `hb-*`, `ci3-launcher-*`, the test cache), S3 log keys (`logs/<prefix>/<key>.log.gz`), build-cache
 artifact names, and the `<hash>[:VAR=val] <cmd>` test command format.

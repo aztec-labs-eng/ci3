@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+# The launcher watchdog (internal/source_launcher_watchdog): when the build container decides the launcher has
+# gone, and when the launcher turns the watchdog on at all. Redis is replaced by stubs, so no server is needed,
+# and nothing here talks to AWS.
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+passed=0
+failed=0
+pass() { echo -e "  \033[32m✓ $1\033[0m"; ((++passed)); }
+fail() { echo -e "  \033[31m✗ $1\033[0m"; ((++failed)); }
+
+# Nothing here should reach AWS; make sure it could not, even by accident.
+unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_PROFILE AWS_WEB_IDENTITY_TOKEN_FILE AWS_ROLE_ARN \
+  AWS_CONTAINER_CREDENTIALS_RELATIVE_URI AWS_CONTAINER_CREDENTIALS_FULL_URI
+export AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null AWS_EC2_METADATA_DISABLED=true
+# Settings the watchdog reads, so the caller's environment cannot change the results.
+unset GITHUB_ACTIONS NO_TERMINATE REF_NAME CI3_LAUNCHER_WATCHDOG CI_REDIS_AVAILABLE
+# The launcher side calls semver, which lives in ci3.
+export PATH=$script_dir:$PATH
+
+source "$script_dir/internal/source_launcher_watchdog"
+
+# --- Container side: watch_launcher ---
+
+# A stub check command. Each call prints the next reply from $tmp/replies, where "err" stands for a failed
+# redis_cli call, which prints nothing. Once the replies run out it leaves $tmp/exhausted and stops the watcher:
+# it runs in timeout's own process group, so signalling group 0 ends the watcher and timeout, not this test.
+cat >"$tmp/check" <<'STUB'
+#!/usr/bin/env bash
+dir=$(dirname "$0")
+n=$(($(cat "$dir/calls") + 1))
+echo $n >"$dir/calls"
+reply=$(sed -n "${n}p" "$dir/replies")
+if [ -z "$reply" ]; then
+  touch "$dir/exhausted"
+  kill -TERM 0
+elif [ "$reply" != err ]; then
+  echo "$reply"
+fi
+STUB
+chmod +x "$tmp/check"
+
+# Usage: watch <replies...>. Runs watch_launcher (checks 0.01 s apart, 3 misses) against those replies, for at
+# most 3 s. Sets tripped (1 if the flag file was created), calls (checks made) and out (what it printed).
+function watch {
+  rm -f "$tmp/flag" "$tmp/exhausted"
+  printf '%s\n' "$@" >"$tmp/replies"
+  echo 0 >"$tmp/calls"
+  # timeout is only a backstop; like the stub, it stops the whole process group, watcher included.
+  out=$(timeout 3 bash -c 'source "$1"; shift; watch_launcher "$@"' _ \
+    "$script_dir/internal/source_launcher_watchdog" 0.01 3 "$tmp/flag" "$tmp/check" || true)
+  calls=$(cat "$tmp/calls")
+  tripped=0
+  [ -e "$tmp/flag" ] && tripped=1
+  return 0
+}
+# A watcher that should not trip must also have used up every reply, or the test proved nothing.
+function expect_no_trip {
+  if [ "$tripped" -eq 0 ] && [ -e "$tmp/exhausted" ]; then pass "$1"; else fail "$1 (tripped=$tripped calls=$calls)"; fi
+}
+function expect_trip_at {
+  if [ "$tripped" -eq 1 ] && [ "$calls" -eq "$2" ] && [[ "$out" == *"LAUNCHER WATCHDOG"* ]]; then
+    pass "$1"
+  else
+    fail "$1 (tripped=$tripped, after $calls checks, expected $2; output '$out')"
+  fi
+}
+
+watch 0 0 0 0 0 0
+expect_no_trip "a key that was never seen never trips, however many misses"
+
+watch 1 0 0 0
+expect_trip_at "seen once, then 3 misses in a row: trips on the third miss, and says so" 4
+
+watch 1 1 0 0
+expect_no_trip "seen, then only 2 misses: does not trip"
+
+watch 1 err err err err err err
+expect_no_trip "errors after the key was seen never trip"
+
+watch 1 "Could not connect to Redis" "ERR wrong number of arguments" "(error) LOADING" 2 "0 0" "1 0"
+expect_no_trip "error messages and unexpected replies never trip"
+
+watch err 0 err 0 0 0
+expect_no_trip "errors do not arm the watcher: misses before the key is seen still count for nothing"
+
+watch 1 0 err 0 err 0
+expect_trip_at "errors between misses change nothing: neither a miss nor a reset" 6
+
+watch 1 0 0 1 0 0
+expect_no_trip "seen, 2 misses, seen again: the count starts over"
+
+watch 1 0 0 1 0 0 0
+expect_trip_at "after the count starts over, 3 new misses trip" 7
+
+# --- Launcher side: when the watchdog is on ---
+
+function wanted {
+  if (export "$@"; launcher_watchdog_wanted); then echo on; else echo off; fi
+}
+function expect_wanted {
+  local want=$1 desc=$2
+  shift 2
+  local got=$(wanted "$@")
+  if [ "$got" = "$want" ]; then pass "$desc"; else fail "$desc (got $got)"; fi
+}
+expect_wanted off "off outside GitHub Actions" X=1
+expect_wanted on "on under GitHub Actions" GITHUB_ACTIONS=true REF_NAME=feature/x
+expect_wanted off "off with NO_TERMINATE=1" GITHUB_ACTIONS=true NO_TERMINATE=1 REF_NAME=feature/x
+expect_wanted off "off for a release" GITHUB_ACTIONS=true REF_NAME=v1.2.3
+expect_wanted off "CI3_LAUNCHER_WATCHDOG=0 turns it off" GITHUB_ACTIONS=true CI3_LAUNCHER_WATCHDOG=0 REF_NAME=feature/x
+expect_wanted on "CI3_LAUNCHER_WATCHDOG=1 turns it on outside GitHub Actions" CI3_LAUNCHER_WATCHDOG=1 REF_NAME=feature/x
+expect_wanted off "CI3_LAUNCHER_WATCHDOG=1 does not override NO_TERMINATE" CI3_LAUNCHER_WATCHDOG=1 NO_TERMINATE=1
+
+# A stub redis_cli: records its arguments and prints whatever $tmp/redis_reply holds.
+function redis_cli {
+  echo "$*" >>"$tmp/redis_calls"
+  cat "$tmp/redis_reply"
+}
+# Usage: heartbeat <redis-available> <first-reply>. Sets started (1 if start_launcher_heartbeat succeeded).
+function heartbeat {
+  : >"$tmp/redis_calls"
+  echo "$2" >"$tmp/redis_reply"
+  launcher_heartbeat_pid=
+  started=0
+  CI_REDIS_AVAILABLE=$1 start_launcher_heartbeat ci3-launcher-123 && started=1
+  return 0
+}
+
+heartbeat 0 OK
+if [ "$started" -eq 0 ] && [ ! -s "$tmp/redis_calls" ] && [ -z "$launcher_heartbeat_pid" ]; then
+  pass "without Redis, the heartbeat does not start (so the container is not told to watch)"
+else
+  fail "heartbeat started without Redis"
+fi
+
+heartbeat 1 ""
+if [ "$started" -eq 0 ] && [ -z "$launcher_heartbeat_pid" ]; then
+  pass "if the first write fails, the heartbeat does not start"
+else
+  fail "heartbeat started although the first write failed"
+fi
+
+heartbeat 1 OK
+if [ "$started" -eq 1 ] && [ "$(cat "$tmp/redis_calls")" = "SETEX ci3-launcher-123 120 1" ] \
+    && kill -0 "$launcher_heartbeat_pid" 2>/dev/null; then
+  pass "when the first write succeeds, the key is set for 120 s and the refresh loop runs"
+else
+  fail "heartbeat did not start: started=$started calls='$(cat "$tmp/redis_calls")'"
+fi
+loop_pid=$launcher_heartbeat_pid
+stop_launcher_heartbeat
+stop_launcher_heartbeat
+for _ in $(seq 50); do kill -0 "$loop_pid" 2>/dev/null || break; sleep 0.1; done
+if ! kill -0 "$loop_pid" 2>/dev/null && [ -z "$launcher_heartbeat_pid" ]; then
+  pass "stop_launcher_heartbeat stops the loop, and is safe to call twice"
+else
+  fail "the refresh loop is still running"
+fi
+
+# --- Wiring in bootstrap_ec2 (by reading the source; running it needs a real instance) ---
+if grep -q -- '-e CI3_LAUNCHER_WATCHDOG=\$CI3_LAUNCHER_WATCHDOG' "$script_dir/bootstrap_ec2" \
+    && grep -q 'if \[ -f \$CI3_LAUNCHER_GONE_FILE \]; then' "$script_dir/bootstrap_ec2" \
+    && grep -q 'sudo rm -f \$CI3_LAUNCHER_GONE_FILE' "$script_dir/bootstrap_ec2"; then
+  pass "bootstrap_ec2 passes the setting to the container, clears a stale flag, and acts on the flag"
+else
+  fail "bootstrap_ec2 is missing part of the watchdog wiring"
+fi
+
+echo
+echo "passed: $passed, failed: $failed"
+[ "$failed" -eq 0 ]
