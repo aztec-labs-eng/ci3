@@ -11,8 +11,9 @@
 #              did; or that the same key was built before but is no longer cached
 #   always     outputs `never`: it always runs, and caches its own items if anything
 #   uncached   caching is off for it, as with uncommitted changes to its inputs
-# Order-only prerequisites are marked "(runs first)". Targets that are not steps yet are left out, unless a
-# step depends on them; STEP_PLAN_ALL=1 shows every target.
+# Order-only prerequisites are marked "(runs first)". The tree shows steps, and a step's prerequisites that are
+# not steps yet (they are part of its key); other targets are left out, and what is below them shown in
+# their place. STEP_PLAN_ALL=1 shows every target.
 NO_CD=1 source $(dirname "${BASH_SOURCE[0]}")/source
 source $ci3/internal/source_step
 
@@ -135,6 +136,41 @@ function why_uncached {
   fi
 }
 
+# Prints the targets to show under t, one per line, order-only ones as "<name>|": its steps, and a step's
+# prerequisites that are not steps (part of its key). Other targets are passed through to what is below them.
+function children_of {
+  local t=$1 d
+  if [ "${STEP_PLAN_ALL:-0}" -eq 1 ]; then
+    for d in ${normal_of[$t]:-}; do echo "$d"; done
+    for d in ${after_of[$t]:-}; do echo "$d|"; done
+    return
+  fi
+  for d in ${normal_of[$t]:-}; do
+    if is_step "$d" || { is_step "$t" && [ -f "$keys/$d.legacy" ]; }; then
+      echo "$d"
+    else
+      steps_below "$d" ""
+    fi
+  done
+  for d in ${after_of[$t]:-}; do steps_below "$d" "|"; done
+}
+
+# Prints the nearest steps at or below a target, each followed by <mark>.
+declare -A steps_below_memo
+function steps_below {
+  local t=$1 mark=$2 d
+  if [ -z "${steps_below_memo[$t]+set}" ]; then
+    if is_step "$t"; then
+      steps_below_memo[$t]=$t
+    elif relevant "$t"; then
+      steps_below_memo[$t]=$(for d in ${normal_of[$t]:-} ${after_of[$t]:-}; do steps_below "$d" ""; done | awk '!seen[$0]++')
+    else
+      steps_below_memo[$t]=
+    fi
+  fi
+  [ -z "${steps_below_memo[$t]}" ] || sed "s/\$/$mark/" <<<"${steps_below_memo[$t]}"
+}
+
 declare -A shown
 counts_cached=0 counts_build=0 counts_always=0 counts_uncached=0
 # Sets lbl to what the plan says about a target, and counts it.
@@ -168,12 +204,8 @@ function show {
   shown[$t]=1
   label "$t"
   printf '%s%s%s%s  %s  %b\n' "$prefix" "$branch" "$t" "$note" "$key" "$lbl"
-  local children=() d
-  # A step's legacy prerequisites are part of its key, so they are shown too.
-  for d in ${normal_of[$t]:-}; do
-    if relevant "$d" || { is_step "$t" && [ -f "$keys/$d.legacy" ]; }; then children+=("$d"); fi
-  done
-  for d in ${after_of[$t]:-}; do relevant "$d" && children+=("$d|"); done
+  local children
+  mapfile -t children < <(children_of "$t" | awk '!seen[$0]++')
   local i n=${#children[@]} c
   for ((i = 0; i < n; i++)); do
     c=${children[$i]}
