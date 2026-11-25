@@ -74,8 +74,12 @@ chmod +x "$tmp/bin/aws"
 cat >"$tmp/cancel.py" <<'EOF'
 import os, signal, subprocess, sys, time
 mode, ready, calls, *cmd = sys.argv[1:]
+# A case runs as a background job, which starts with SIGINT ignored where bash follows POSIX; a CI
+# runner or a terminal starts the entry point with the default.
+def default_sigint():
+    signal.signal(signal.SIGINT, signal.SIG_DFL)
 p = subprocess.Popen(cmd, cwd=os.environ["REPO"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                     start_new_session=(mode == "terminal"))
+                     start_new_session=(mode == "terminal"), preexec_fn=default_sigint)
 deadline = time.time() + 60
 while time.time() < deadline and p.poll() is None:
     if os.path.exists(calls) and all(r in open(calls).read() for r in ready.split("|")):
