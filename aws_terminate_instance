@@ -16,6 +16,15 @@ export AWS_DEFAULT_REGION=us-east-2
 if [ -n "$iid" ]; then
     echo "Terminating instance: $iid..."
     dump_fail "aws ec2 terminate-instances --instance-ids $iid" > /dev/null
+    # Instances it launched itself (tagged by aws_request_instance_type), such as a benchmark box:
+    # they cannot be cleaned up from inside an instance that is being terminated.
+    children=$(aws ec2 describe-instances \
+      --filters "Name=tag:ParentInstance,Values=$iid" "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+      --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null || true)
+    if [ -n "$children" ]; then
+        echo "Terminating instances it launched: $children..."
+        dump_fail "aws ec2 terminate-instances --instance-ids $children" > /dev/null
+    fi
 fi
 
 if [ -n "$sir" ]; then

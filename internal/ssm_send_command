@@ -60,6 +60,21 @@ exec_timeout=${SSM_EXEC_TIMEOUT:-$SSM_POLL_TIMEOUT}
 ssm_params=$(jq -n --arg e "$encoded" --arg p "$run_prefix" --arg t "$exec_timeout" \
   '{commands: ["f=$(mktemp /tmp/ssm_cmd.XXXXXX); log=$(mktemp /tmp/ssm_out.XXXXXX); echo " + ($e | @json) + " | base64 -d > $f; chmod 644 $f; " + $p + "bash $f > $log 2>&1 < /dev/null; ret=$?; [ $ret -eq 0 ] || tail -n 100 $log | tail -c 20000 >&2; rm -f $f $log; exit $ret"], executionTimeout: [$t]}')
 
+# Cancel the SSM command server-side on signal so it doesn't stay InProgress
+# after the instance is terminated. This is a runner→SSM-service API call,
+# independent of the SSM agent on the instance. Installed before the command is
+# sent: a signal during send-command is handled once it returns, so the command
+# it started is still cancelled.
+command_id=
+function cancel_ssm_command {
+  trap '' SIGINT SIGTERM
+  [ -z "$command_id" ] || aws ssm cancel-command \
+    --region "$region" \
+    --command-id "$command_id" 2>/dev/null || true
+  exit 143  # 128 + 15 (SIGTERM)
+}
+trap cancel_ssm_command SIGINT SIGTERM
+
 command_id=$(aws ssm send-command \
   --region "$region" \
   --instance-ids "$iid" \
@@ -74,18 +89,6 @@ if [ -z "$command_id" ] || [ "$command_id" = "None" ]; then
 fi
 
 echo "SSM command $command_id sent to $iid" >&2
-
-# Cancel the SSM command server-side on signal so it doesn't stay InProgress
-# after the instance is terminated. This is a runner→SSM-service API call,
-# independent of the SSM agent on the instance.
-# Exit so bootstrap_ec2's EXIT trap can run and terminate the EC2 instance.
-function cancel_ssm_command {
-  aws ssm cancel-command \
-    --region "$region" \
-    --command-id "$command_id" 2>/dev/null || true
-  exit 143  # 128 + 15 (SIGTERM)
-}
-trap cancel_ssm_command SIGINT SIGTERM
 
 # --- Step 2: Optionally skip polling (fire-and-forget) ---
 if [ "${SSM_NO_WAIT:-0}" -eq 1 ]; then
@@ -128,6 +131,8 @@ while true; do
         echo "Instance $iid is $inst_state; aborting SSM poll." >&2
         exit 1
       fi
+      sleep 5 &
+      wait $!
       ;;
     *)
       if (( SECONDS - last_log >= 600 )); then
@@ -135,7 +140,9 @@ while true; do
         echo "SSM command $command_id still $status after ${elapsed}m." >&2
         last_log=$SECONDS
       fi
-      sleep 5
+      # In the background, so a signal cancels the command at once rather than after the sleep.
+      sleep 5 &
+      wait $!
       ;;
   esac
 done

@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Runs several CI builds at once, each on its own EC2 instance through bootstrap_ec2, as one CI run.
+#
+#   bootstrap_ec2_multi "<job id> <arch> <bootstrap target> [ref name]" ...
+#
+# e.g. bootstrap_ec2_multi "x-full amd64 ci-full" "a-fast arm64 ci-fast" runs ./bootstrap.sh ci-full on
+# an amd64 instance and ./bootstrap.sh ci-fast on an arm64 one. It fails as soon as one job fails, and
+# stops the others.
+#
+# Each job's output goes to its own dashboard log, nested under the run's (RUN_ID). Only the first job
+# gets BENCH_UPLOAD, so jobs of one run don't race to upload the same benchmarks. INSTANCE_NAME_SUFFIX,
+# if set, is appended to each job's instance name.
+#
+# Cancelling: a caller must exec into this script, so that the signal reaches it. It stops every job,
+# and each job's bootstrap_ec2 terminates its instance, before this script exits.
+NO_CD=1 source $(dirname "${BASH_SOURCE[0]}")/source
+source $ci3/internal/source_refname
+
+[ "$#" -gt 0 ] || { echo "usage: $(basename "$0") \"<job id> <arch> <bootstrap target> [ref name]\" ..." >&2; exit 1; }
+
+export RUN_ID=${RUN_ID:-$(date +%s%3N)}
+export CI_DASHBOARD=${CI_DASHBOARD:-$(ci_dashboard_section)}
+export AWS_SHUTDOWN_TIME=${AWS_SHUTDOWN_TIME:-75}
+export AWS_SHUTDOWN_TIME_ARM=${AWS_SHUTDOWN_TIME_ARM:-90}
+export DENOISE=1
+export DENOISE_WIDTH=32
+bench_primary=${1%% *}
+export bench_primary
+
+function run_job {
+  [ -n "${4:-}" ] && export REF_NAME=$4
+  local bench_upload=0
+  [ "$1" == "$bench_primary" ] && bench_upload=${BENCH_UPLOAD:-0}
+  # bootstrap_ec2 is exec'd, so denoise's signal on cancel reaches it, and its exit code is the job's;
+  # add_timestamps reads its output through a process substitution rather than a pipeline.
+  PARENT_LOG_ID=$RUN_ID JOB_ID=$1 INSTANCE_POSTFIX=$1${INSTANCE_NAME_SUFFIX:-} ARCH=$2 BENCH_UPLOAD=$bench_upload \
+    DENOISE_DISPLAY_NAME="bootstrap_ec2 './bootstrap.sh $3'" \
+    exec denoise "exec bootstrap_ec2 './bootstrap.sh $3' > >(add_timestamps) 2>&1"
+}
+export -f run_job
+
+# parallel runs in the background under `wait`, so a signal is handled at once. On SIGTERM, parallel
+# sends each job --termseq and waits for them to exit; each job's bootstrap_ec2 then terminates its
+# instance. Repeated signals are ignored meanwhile, and so is SIGPIPE, as the log readers may be gone.
+function on_signal {
+  trap '' SIGINT SIGTERM SIGPIPE
+  kill -TERM "$parallel_pid" 2>/dev/null
+  wait "$parallel_pid" 2>/dev/null
+  wait "$log_pid" 2>/dev/null
+  exit 143
+}
+trap on_signal SIGINT SIGTERM
+
+exec {log_fd}> >(add_timestamps | DUP=1 cache_log "CI run" $RUN_ID)
+log_pid=$!
+parallel --colsep ' ' --jobs 100 --termseq 'TERM,10000' \
+  --tagstring '{1}' \
+  --line-buffered --halt now,fail=1 \
+  'run_job {1} {2} {3} {4}' ::: "$@" >&$log_fd 2>&1 &
+parallel_pid=$!
+exec {log_fd}>&-
+
+code=0
+wait "$parallel_pid" || code=$?
+# The log finishes once parallel's output is drained.
+wait "$log_pid" 2>/dev/null
+exit $code

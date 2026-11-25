@@ -92,4 +92,5 @@ else
   done
 fi
 
-FLEET_OVERRIDES="${overrides# }" aws_request_instance_type "$name" "$ami" "$state_dir"
+# exec, so a signal to cancel the request reaches aws_request_instance_type, which cleans up.
+FLEET_OVERRIDES="${overrides# }" exec aws_request_instance_type "$name" "$ami" "$state_dir"

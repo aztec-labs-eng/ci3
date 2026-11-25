@@ -71,7 +71,7 @@ function report_instance {
     evicted="$1" >/dev/null 2>&1 &
 }
 
-# Trap function to terminate our running instance when the script exits.
+# Terminates our instance, and any instance it launched, when the script exits.
 function cleanup {
   # First: a cancelled job may not live through the termination.
   report_instance false
@@ -79,10 +79,36 @@ function cleanup {
     aws_terminate_instance "$state_dir" >/dev/null 2>&1
   fi
 }
-# It's important that cleanup writes to /dev/null.
-# We run this from parallel, which closes stdout/stderr during its cleanup.
-# This causes cleanup to die silently, probably from a SIGPIPE.
-trap 'cleanup >/dev/null' SIGINT SIGTERM EXIT
+
+# Cancellation. CI cancels by signalling only the process it started, so a caller must exec into this
+# script, and everything slow here runs in the background under `wait`, which a signal interrupts at
+# once (bash runs a trap only after a foreground command finishes). The child is stopped first, so
+# an instance request in flight records its instance before cleanup reads it. Repeated signals, such
+# as a second Ctrl-C or CI's SIGTERM after its SIGINT, are ignored until cleanup is done, and so is
+# SIGPIPE: the log readers on our stdout may already be gone, and cleanup must not die writing to them.
+child_pid=
+function on_signal {
+  trap '' SIGINT SIGTERM SIGPIPE
+  if [ -n "$child_pid" ]; then
+    kill -TERM "$child_pid" 2>/dev/null
+    wait "$child_pid" 2>/dev/null
+  fi
+  cleanup >/dev/null 2>&1
+  trap - EXIT
+  exit 143
+}
+trap on_signal SIGINT SIGTERM
+trap 'cleanup >/dev/null 2>&1' EXIT
+
+# Runs a command in the background and waits for it, so a signal is handled while it runs.
+function interruptible {
+  "$@" &
+  child_pid=$!
+  local rc=0
+  wait "$child_pid" || rc=$?
+  child_pid=
+  return $rc
+}
 
 # Verify that the commit exists on the remote. --negotiate-only asks origin which commits it has in
 # common with this tip and transfers no objects, so the commit itself appears in the output only
@@ -128,7 +154,7 @@ fi
 
 # Request new instance.
 requested_at=$(date +%s)
-aws_request_instance "$instance_name" "$cores" "$arch" "$state_dir"
+interruptible aws_request_instance "$instance_name" "$cores" "$arch" "$state_dir"
 ready_at=$(date +%s)
 sir=""
 if [[ -f "$state_dir/sir" ]]; then
@@ -396,6 +422,7 @@ start_build() {
     -e GITHUB_ACTOR=${GITHUB_ACTOR:-} \
     -e EC2_INSTANCE_TYPE=${EC2_INSTANCE_TYPE:-unknown} \
     -e EC2_SPOT=${EC2_SPOT:-unknown} \
+    -e CI3_PARENT_INSTANCE_ID=$iid \
     -e BENCH_UPLOAD=${BENCH_UPLOAD:-} \
     -e AZTEC_TOOLCHAIN_DEFAULT_MAJOR_VERSION=${AZTEC_TOOLCHAIN_DEFAULT_MAJOR_VERSION:-} \
     -e DRY_RUN=${DRY_RUN:-} \
@@ -433,7 +460,7 @@ echo_header "invoke SSM command"
 # Send host script via SSM and poll until completion. As ubuntu, not SSM's default of root.
 set +e
 SSM_RUN_AS=ubuntu SSM_POLL_TIMEOUT=${SSM_POLL_TIMEOUT:-$((AWS_SHUTDOWN_TIME * 60 + 600))} \
-  ssm_send_command "$iid" "$host_script"
+  interruptible ssm_send_command "$iid" "$host_script"
 exit_code=$?
 set -e
 
