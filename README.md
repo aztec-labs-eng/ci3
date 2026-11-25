@@ -126,6 +126,7 @@ The dependency runs both ways. ci3 reads these from the repository it is buildin
 - `scripts/process_flake_log.py` — optional; run by `parallelize` after a test run when present.
 - `build-images/src/home/.gitconfig` — mounted into containers by `docker_isolate`.
 - `CI3_EVENT_ENDPOINT`, `CI3_EVENT_TOKEN` and `CI3_EVENT_PROJECT` — optional; when all are set, `bootstrap_ec2` sends a `ci.instance` event per build instance through `send_event` to that OTLP endpoint, for example `https://otel.aztec-labs.com`.
+- **`exec` into `bootstrap_ec2` or `bootstrap_ec2_multi`**, all the way from the CI step: `run: exec ./ci.sh fast` in the workflow, `exec bootstrap_ec2 …` in `ci.sh`. CI cancels a job by signalling only the process it started (GitHub Actions sends that one process SIGINT, then SIGTERM, then SIGKILL 10 seconds later), so that process must be the ci3 script that terminates the instances. A script in between that runs it without `exec`, including as part of a pipeline, keeps the signal to itself, and the instances run on until their shutdown timers. `tests/cancel_test` covers this.
 
 ### State shared between versions
 

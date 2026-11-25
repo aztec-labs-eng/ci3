@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+# Cancelling a CI run terminates its instances. Runs bootstrap_ec2 and bootstrap_ec2_multi against a stub
+# aws, and cancels them the ways they are cancelled for real:
+#   - as GitHub Actions does: SIGINT to the one process it started, SIGTERM 7.5s later, SIGKILL 2.5s
+#     after that. The entry point is that process, as a workflow step that execs into it makes it.
+#   - as a terminal does on Ctrl-C: SIGINT to the whole foreground process group, here twice, the second
+#     during cleanup.
+# Each case passes when every instance launched has been terminated and its SSM command cancelled
+# before the SIGKILL would land, and no process of the run is left.
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+tmp=$(mktemp -d)
+trap 'pkill -KILL -f "$tmp/" 2>/dev/null || true; rm -rf "$tmp"' EXIT
+passed=0
+failed=0
+pass() { echo -e "  \033[32m✓ $1\033[0m"; ((++passed)); }
+fail() { echo -e "  \033[31m✗ $1\033[0m"; ((++failed)); }
+
+# A repository whose commit is on its origin, as bootstrap_ec2 requires.
+git init -q --bare "$tmp/origin.git"
+git init -q "$tmp/repo"
+git -C "$tmp/repo" -c user.name=t -c user.email=t@t commit -q --allow-empty -m init
+git -C "$tmp/repo" remote add origin "$tmp/origin.git"
+git -C "$tmp/repo" push -q origin HEAD:refs/heads/main
+
+# The stub aws: launches numbered instances, keeps SSM commands InProgress unless told otherwise, and
+# logs what it was asked to do. STUB_FLEET_DELAY and STUB_TERMINATE_DELAY slow those calls down.
+mkdir -p "$tmp/bin"
+cat >"$tmp/bin/aws" <<'EOF'
+#!/usr/bin/env bash
+state=${STUB_STATE:?}
+log() { flock "$state/lock" bash -c 'echo "$1" >>"$2"' _ "$1" "$state/calls"; }
+args="$*"
+case "$1 $2" in
+  "ec2 describe-security-groups") echo vpc-1 ;;
+  "ec2 describe-subnets") printf 'us-east-2a\tsubnet-1\n' ;;
+  "ec2 create-launch-template") echo lt-1 ;;
+  "ec2 delete-launch-template") ;;
+  "ec2 create-fleet")
+    log "requesting fleet"
+    sleep "${STUB_FLEET_DELAY:-0}"
+    n=$(flock "$state/lock" bash -c 'n=$(($(cat "$1" 2>/dev/null || echo 0) + 1)); echo $n >"$1"; echo $n' _ "$state/count")
+    log "launched i-$n"
+    echo "{\"Instances\":[{\"InstanceIds\":[\"i-$n\"],\"InstanceType\":\"m6a.32xlarge\"}]}" ;;
+  "ec2 describe-instances")
+    if [[ "$args" == *tag:ParentInstance* ]]; then
+      parent=$(grep -o 'tag:ParentInstance,Values=[^ ]*' <<<"$args" | cut -d= -f2)
+      cat "$state/children-of-$parent" 2>/dev/null || true
+    elif [[ "$args" == *instance-id* ]]; then
+      echo 10.0.0.1
+    fi ;;
+  "ec2 terminate-instances")
+    sleep "${STUB_TERMINATE_DELAY:-0}"
+    for id in ${args#*--instance-ids }; do [[ "$id" == i-* ]] && log "terminated $id"; done ;;
+  "ec2 describe-instance-status") echo running ;;
+  "ssm describe-instance-information") echo Online ;;
+  "ssm send-command")
+    iid=$(grep -o -- '--instance-ids [^ ]*' <<<"$args" | cut -d' ' -f2)
+    params=; prev=
+    for a in "$@"; do [ "$prev" = --parameters ] && params=$a; prev=$a; done
+    script=$(jq -r '.commands[0]' <<<"$params" | grep -o 'echo "[A-Za-z0-9+/=]*"' | cut -d'"' -f2 | base64 -d)
+    if [[ "$script" == *"shutdown -h"* ]]; then echo timer-$iid; else log "command on $iid"; echo cmd-$iid; fi ;;
+  "ssm get-command-invocation")
+    echo "{\"Status\":\"$(cat "$state/ssm_status" 2>/dev/null || echo InProgress)\",\"ResponseCode\":0}" ;;
+  "ssm cancel-command")
+    log "cancelled $(grep -o -- '--command-id [^ ]*' <<<"$args" | cut -d' ' -f2)" ;;
+esac
+EOF
+chmod +x "$tmp/bin/aws"
+
+# Runs one case: the entry point, started like CI or a terminal starts it, then cancelled once `ready`
+# is in the stub's log. Prints how the run ended.
+cat >"$tmp/cancel.py" <<'EOF'
+import os, signal, subprocess, sys, time
+mode, ready, calls, *cmd = sys.argv[1:]
+p = subprocess.Popen(cmd, cwd=os.environ["REPO"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=(mode == "terminal"))
+deadline = time.time() + 60
+while time.time() < deadline and p.poll() is None:
+    if os.path.exists(calls) and ready in open(calls).read():
+        break
+    time.sleep(0.1)
+else:
+    print(f"never got to '{ready}' (exit {p.poll()})"); p.kill(); sys.exit(1)
+if mode == "ci":
+    for sig, wait in ((signal.SIGINT, 7.5), (signal.SIGTERM, 2.5)):
+        p.send_signal(sig)
+        try:
+            p.wait(wait); print(f"exited on {sig.name}"); break
+        except subprocess.TimeoutExpired:
+            pass
+    else:
+        p.kill(); p.wait(); print("needed SIGKILL")
+else:
+    os.killpg(p.pid, signal.SIGINT)
+    time.sleep(0.5)
+    try: os.killpg(p.pid, signal.SIGINT)
+    except ProcessLookupError: pass
+    try:
+        p.wait(10); print("exited on Ctrl-C")
+    except subprocess.TimeoutExpired:
+        p.kill(); p.wait(); print("still running 10s after Ctrl-C")
+EOF
+
+case_n=0
+# check <name> <mode> <ready> <want instances terminated> <want commands cancelled> <entry point...>
+function check {
+  local name=$1 mode=$2 ready=$3 want_terminated=$4 want_cancelled=$5
+  shift 5
+  case_n=$((case_n + 1))
+  local state=$tmp/state$case_n
+  mkdir -p "$state"
+  : >"$state/calls"
+  echo i-child >"$state/children-of-i-1"
+  local ended
+  ended=$(env -i PATH="$tmp/bin:$PATH" HOME="$tmp" REPO="$tmp/repo" STUB_STATE="$state" CI=1 CI_REDIS_AVAILABLE=0 \
+    GITHUB_REPOSITORY=test/repo REF_NAME=test AWS_DEFAULT_REGION=us-east-2 \
+    STUB_FLEET_DELAY="${STUB_FLEET_DELAY:-0}" STUB_TERMINATE_DELAY="${STUB_TERMINATE_DELAY:-0}" \
+    python3 "$tmp/cancel.py" "$mode" "$ready" "$state/calls" "$@" 2>&1 || true)
+  sleep 1
+  local terminated cancelled left
+  terminated=$({ grep '^terminated ' "$state/calls" || true; } | cut -d' ' -f2 | sort -u | xargs)
+  cancelled=$(grep -c '^cancelled ' "$state/calls" || true)
+  left=$(pgrep -f "$script_dir/(bootstrap_ec2|internal/ssm_send_command|denoise|aws_request_instance)" 2>/dev/null | wc -l || true)
+  if [ "$terminated" = "$want_terminated" ] && [ "$cancelled" -ge "$want_cancelled" ] && [[ "$ended" != *SIGKILL* && "$ended" != *"still running"* && "$ended" != *never* ]]; then
+    pass "$name ($ended)"
+  else
+    fail "$name: $ended; terminated '$terminated' (want '$want_terminated'), $cancelled SSM commands cancelled (want $want_cancelled); calls: $(xargs <"$state/calls")"
+  fi
+}
+
+check "CI cancel while the build runs terminates the instance and the ones it launched" \
+  ci "command on i-1" "i-1 i-child" 1 "$script_dir/bootstrap_ec2" "./bootstrap.sh ci-fast"
+
+STUB_FLEET_DELAY=3 check "CI cancel while the instance is being requested terminates it" \
+  ci "requesting fleet" "i-1 i-child" 0 "$script_dir/bootstrap_ec2" "./bootstrap.sh ci-fast"
+
+STUB_TERMINATE_DELAY=1 check "Ctrl-C, twice, while the build runs terminates the instance" \
+  terminal "command on i-1" "i-1 i-child" 1 "$script_dir/bootstrap_ec2" "./bootstrap.sh ci-fast"
+
+check "CI cancel of a multi-job run terminates every job's instance" \
+  ci "command on i-2" "i-1 i-2 i-child" 2 "$script_dir/bootstrap_ec2_multi" "x-a amd64 ci-fast" "x-b amd64 ci-fast"
+
+STUB_TERMINATE_DELAY=1 check "Ctrl-C, twice, of a multi-job run terminates every job's instance" \
+  terminal "command on i-2" "i-1 i-2 i-child" 2 "$script_dir/bootstrap_ec2_multi" "x-a amd64 ci-fast" "x-b amd64 ci-fast"
+
+echo
+echo "$passed passed, $failed failed."
+[ "$failed" -eq 0 ]

@@ -22,8 +22,11 @@ function cleanup {
     wait $publish_pid
     publish_pid=
   fi
+  # Stops the command, not the redact at the end of its pipeline, which then drains what the command
+  # wrote before it stopped. A command that should clean up on the way, such as bootstrap_ec2, must
+  # be the process that shell runs: give it as `exec <command>`.
   if [ -n "${job_pid:-}" ]; then
-    kill $job_pid &>/dev/null
+    kill $(cat "$cmd_pidfile" 2>/dev/null) &>/dev/null
     wait $job_pid
     job_pid=
   fi
@@ -40,7 +43,7 @@ function cleanup {
 }
 trap cleanup SIGINT SIGTERM
 # Remove file on exit, so we can publish even after SIGINT or SIGTERM.
-trap 'cleanup; rm -f $outfile $dots_fifo' EXIT
+trap 'cleanup; rm -f $outfile $dots_fifo $cmd_pidfile' EXIT
 
 dots_per_line=${DENOISE_WIDTH:-64}
 dot_count=0
@@ -125,8 +128,9 @@ while IFS= read -r line; do
 done < "$dots_fifo" &
 dots_pid=$!
 
-# Execute the command in background.
-PARENT_LOG_ID=$key bash -c "set -euo pipefail; $cmd" 2>&1 | redact > $outfile &
+# Execute the command in background. The shell that runs it records its pid for cleanup.
+cmd_pidfile=$(mktemp)
+PARENT_LOG_ID=$key bash -c 'echo $$ > "$0"; set -euo pipefail; eval "$1"' "$cmd_pidfile" "$cmd" 2>&1 | redact > $outfile &
 job_pid=$!
 
 # Wait for the job to finish and get its exit status.

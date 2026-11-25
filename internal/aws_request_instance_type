@@ -24,14 +24,30 @@ function delete_lt {
   rm -f "$lt_path"
 }
 
-# On interrupt, tear down whatever we acquired. On normal exit we only drop the
-# launch template (the instance must survive for the caller).
+# Records an instance as soon as a fleet returns one, so that cleanup can find it.
+function record_iid {
+  iid=$(echo "${resp:-}" | jq -r '.Instances[0].InstanceIds[0] // empty' 2>/dev/null || true)
+  [ -z "$iid" ] || echo "$iid" > "$iid_path"
+}
+
+# On interrupt, tear down whatever we acquired and stop. A signal that lands while a fleet request is
+# in flight is handled once it returns, so its instance is recorded first. On normal exit we only
+# drop the launch template (the instance must survive for the caller).
 function cleanup {
+  trap '' SIGINT SIGTERM
+  [ -s "$iid_path" ] || record_iid
   delete_lt
   aws_terminate_instance "$state_dir"
+  exit 143
 }
 trap 'cleanup' SIGINT SIGTERM
 trap 'delete_lt' EXIT
+
+# Sleeps in the background, so a signal is handled at once rather than after the sleep.
+function pause {
+  sleep "$1" &
+  wait $!
+}
 
 # Instances get no key pair and a security group with no inbound rules: they are reached only through SSM.
 if [ -n "${KEY_NAME:-}" ]; then
@@ -61,6 +77,10 @@ tags_json="{\"Key\":\"Name\",\"Value\":\"$name\"},{\"Key\":\"Group\",\"Value\":\
 [ -n "${GITHUB_ACTOR:-}" ] && tags_json+=",{\"Key\":\"GithubActor\",\"Value\":\"${GITHUB_ACTOR//[\[\]]/}\"}"
 [ -n "${CI_MODE:-}" ] && tags_json+=",{\"Key\":\"CICommand\",\"Value\":\"$CI_MODE\"}"
 [ -n "${CI_DASHBOARD:-}" ] && tags_json+=",{\"Key\":\"Dashboard\",\"Value\":\"$CI_DASHBOARD\"}"
+# Launched from a build instance (bootstrap_ec2 passes its id in): whoever terminates that instance
+# terminates this one too (see aws_terminate_instance), since nothing inside a terminating instance
+# gets to clean up.
+[ -n "${CI3_PARENT_INSTANCE_ID:-}" ] && tags_json+=",{\"Key\":\"ParentInstance\",\"Value\":\"$CI3_PARENT_INSTANCE_ID\"}"
 # Repo is the cost allocation tag that splits the shared account's EC2 and EBS bill by repository.
 # Lowercased: CI's GITHUB_REPOSITORY and a local checkout's origin url can differ in case, and a
 # cost allocation tag groups by exact value.
@@ -153,7 +173,7 @@ if [ "${NO_SPOT:-0}" -ne 1 ]; then
       --spot-options "AllocationStrategy=$spot_strategy" \
       --launch-template-configs "$ltc" \
       --output json 2>"$state_dir/fleet_err") || true
-    iid=$(echo "$resp" | jq -r '.Instances[0].InstanceIds[0] // empty' 2>/dev/null || true)
+    record_iid
     if [ -n "$iid" ]; then
       instance_type=$(echo "$resp" | jq -r '.Instances[0].InstanceType // empty')
       lifecycle=spot
@@ -163,7 +183,7 @@ if [ "${NO_SPOT:-0}" -ne 1 ]; then
       echo "Spot fleet unfulfilled after ${spot_timeout}s; falling back to on-demand."
       break
     fi
-    sleep "$spot_poll"
+    pause "$spot_poll"
   done
 fi
 
@@ -182,7 +202,7 @@ if [ -z "$iid" ]; then
       --on-demand-options "AllocationStrategy=$ondemand_strategy" \
       --launch-template-configs "$ltc" \
       --output json 2>"$state_dir/fleet_err") || true
-    iid=$(echo "$resp" | jq -r '.Instances[0].InstanceIds[0] // empty' 2>/dev/null || true)
+    record_iid
     if [ -n "$iid" ]; then
       instance_type=$(echo "$resp" | jq -r '.Instances[0].InstanceType // empty')
       lifecycle=ondemand
@@ -193,7 +213,7 @@ if [ -z "$iid" ]; then
       break
     fi
     echo "On-demand capacity unavailable$(echo "$resp" | jq -r '.Errors[0].ErrorCode // "" | if . == "" then "" else " (" + . + ")" end' 2>/dev/null); retrying in ${ondemand_poll}s (elapsed ${SECONDS}s)..."
-    sleep "$ondemand_poll"
+    pause "$ondemand_poll"
   done
 fi
 
@@ -205,7 +225,6 @@ if [ -z "$iid" ]; then
 fi
 
 echo "Instance id: $iid ($instance_type, $lifecycle)"
-echo "$iid" > "$iid_path"
 
 # Instances are launched; the launch template is no longer needed.
 delete_lt
@@ -217,7 +236,7 @@ echo "$lifecycle" > "$state_dir/spot"
 
 ip=""
 while [ -z "${ip:-}" ]; do
-  sleep 1
+  pause 1
   ip=$(aws ec2 describe-instances \
     --filter "Name=instance-id,Values=$iid" \
     --query "Reservations[*].Instances[*].PublicIpAddress" \
@@ -236,7 +255,7 @@ while (( SECONDS < 300 )); do
     --output text 2>/dev/null) || true
   >&2 echo "SSM status: ${ssm_status:-Inactive}"
   [ "$ssm_status" = "Online" ] && break
-  sleep 5
+  pause 5
 done
 
 if [ "$ssm_status" != "Online" ]; then
