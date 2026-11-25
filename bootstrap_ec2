@@ -104,11 +104,15 @@ function stop_lease {
 interruptible_pid=
 function on_signal {
   trap '' SIGINT SIGTERM SIGPIPE
+  # Every step is best effort. Under errexit, the child's nonzero exit would end the handler here.
+  set +e
   if [ -n "$interruptible_pid" ]; then
     kill -TERM "$interruptible_pid" 2>/dev/null
     wait "$interruptible_pid" 2>/dev/null
   fi
   cleanup >/dev/null 2>&1
+  # Without it, the commit's status stays pending, shown as still running, once the run is gone.
+  post_github_status --wait error "ci/${status_job_id}" "$log_url" "Cancelled" >/dev/null 2>&1
   trap - EXIT
   exit 143
 }

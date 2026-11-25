@@ -2,7 +2,10 @@
 # Post a GitHub commit status (pending/success/failure/error) with a target URL.
 # No-op when not in CI (CI!=1) or when required env vars are missing.
 #
-# Usage: post_github_status <state> <context> <target_url> [description]
+# Usage: post_github_status [--wait] <state> <context> <target_url> [description]
+#
+# It posts in the background and returns at once, unless given --wait: then it returns once the post is
+# done, or after 5 seconds, for a caller about to exit, whose orphaned post might never be sent.
 #
 # Examples:
 #   post_github_status pending "ci/build" "http://ci.aztec-labs.com/abc123"
@@ -17,6 +20,12 @@ set -euo pipefail
 
 # No-op outside CI.
 [ "${CI:-0}" != "1" ] && exit 0
+
+wait_for_post=0
+if [ "${1:-}" = --wait ]; then
+  wait_for_post=1
+  shift
+fi
 
 state=${1:?usage: post_github_status <state> <context> <target_url> [description]}
 context=${2:?usage: post_github_status <state> <context> <target_url> [description]}
@@ -41,9 +50,9 @@ body=$(jq -n \
   --arg context "$context" \
   '{state: $state, target_url: $target_url, description: $description, context: $context}')
 
-# Post asynchronously — don't block the caller.
-curl -s -o /dev/null -X POST \
+curl -s -o /dev/null --max-time 5 -X POST \
   -H "Authorization: token $token" \
   -H "Accept: application/vnd.github+json" \
   "https://api.github.com/repos/${repo}/statuses/${sha}" \
   -d "$body" &
+[ "$wait_for_post" -eq 0 ] || wait $! || true

@@ -6,7 +6,8 @@
 #   - as a terminal does on Ctrl-C: SIGINT to the whole foreground process group, here twice, the second
 #     during cleanup.
 # Each case passes when every instance launched has been terminated and its SSM command cancelled
-# before the SIGKILL would land, and no process of the run is left.
+# before the SIGKILL would land, every commit status it posted has been finished as an error, and no
+# process of the run is left.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -65,6 +66,17 @@ esac
 EOF
 chmod +x "$tmp/bin/aws"
 
+# The stub curl logs each commit status posted, as "status <context> <state>", and does nothing else.
+cat >"$tmp/bin/curl" <<'EOF'
+#!/usr/bin/env bash
+state=${STUB_STATE:?}
+[[ "$*" == */statuses/* ]] || exit 0
+while [ $# -gt 0 ]; do [ "$1" = -d ] && body=$2; shift; done
+line=$(jq -r '"status \(.context) \(.state)"' <<<"$body")
+flock "$state/lock" bash -c 'echo "$1" >>"$2"' _ "$line" "$state/calls"
+EOF
+chmod +x "$tmp/bin/curl"
+
 # Runs one case: the entry point, started like CI or a terminal starts it, then cancelled once every
 # `|`-separated line of `ready` is in the stub's log. Prints how the run ended.
 cat >"$tmp/cancel.py" <<'EOF'
@@ -117,16 +129,20 @@ function run_case {
   : >"$state/calls"
   local ended
   ended=$(env -i PATH="$tmp/bin:$PATH" HOME="$tmp" REPO="$tmp/repo" STUB_STATE="$state" CI=1 CI_REDIS_AVAILABLE=0 \
-    GITHUB_REPOSITORY=test/repo REF_NAME=test AWS_DEFAULT_REGION=us-east-2 \
+    GITHUB_REPOSITORY=test/repo GITHUB_TOKEN=test REF_NAME=test AWS_DEFAULT_REGION=us-east-2 \
     STUB_FLEET_DELAY="${STUB_FLEET_DELAY:-0}" STUB_TERMINATE_DELAY="${STUB_TERMINATE_DELAY:-0}" \
     python3 "$tmp/cancel.py" "$mode" "$ready" "$state/calls" "$@" 2>&1 || true)
   local terminated cancelled
   terminated=$({ grep '^terminated ' "$state/calls" || true; } | cut -d' ' -f2 | sort -u | xargs)
   cancelled=$(grep -c '^cancelled ' "$state/calls" || true)
-  if [ "$terminated" = "$want_terminated" ] && [ "$cancelled" -ge "$want_cancelled" ] && [[ "$ended" != *SIGKILL* && "$ended" != *"still running"* && "$ended" != *never* ]]; then
+  # The last status posted for each context: a cancelled run's must not be left pending.
+  local statuses
+  statuses=$({ grep '^status ' "$state/calls" || true; } | tac | sort -u -k2,2 -s | cut -d' ' -f3 | sort -u | xargs)
+  if [ "$terminated" = "$want_terminated" ] && [ "$cancelled" -ge "$want_cancelled" ] && [ "$statuses" = error ] &&
+    [[ "$ended" != *SIGKILL* && "$ended" != *"still running"* && "$ended" != *never* ]]; then
     pass "$name ($ended)"
   else
-    fail "$name: $ended; terminated '$terminated' (want '$want_terminated'), $cancelled SSM commands cancelled (want $want_cancelled); calls: $(xargs <"$state/calls")"
+    fail "$name: $ended; terminated '$terminated' (want '$want_terminated'), $cancelled SSM commands cancelled (want $want_cancelled), statuses left '$statuses' (want error); calls: $(xargs <"$state/calls")"
   fi
 }
 
