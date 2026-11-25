@@ -44,6 +44,8 @@ export -f run_job
 # instance. Repeated signals are ignored meanwhile, and so is SIGPIPE, as the log readers may be gone.
 function on_signal {
   trap '' SIGINT SIGTERM SIGPIPE
+  # Under errexit, parallel's nonzero exit would end the handler before the run's log is flushed.
+  set +e
   kill -TERM "$parallel_pid" 2>/dev/null
   wait "$parallel_pid" 2>/dev/null
   wait "$log_pid" 2>/dev/null
