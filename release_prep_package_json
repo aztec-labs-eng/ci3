@@ -17,6 +17,14 @@ if [ "$check_only" -eq 0 ]; then
   jq --arg v $version '.version = $v' package.json >$tmp && mv $tmp package.json
 fi
 
+# deploy_npm's pack mode sets these for npm provenance, which accepts a package only when
+# repository.url names the repository it was built from.
+if [ "$check_only" -eq 0 ] && [ -n "${NPM_PACKAGE_REPOSITORY:-}" ]; then
+  jq --arg u "$NPM_PACKAGE_REPOSITORY" --arg d "${NPM_PACKAGE_DIR:-}" \
+    '.repository = ({type: "git", url: $u} + (if $d == "" or $d == "." then {} else {directory: $d} end))' \
+    package.json >$tmp && mv $tmp package.json
+fi
+
 # NPM_RELEASE_RESOLUTIONS (a JSON map: the enclosing workspace root's `resolutions` field)
 # selects scoped mode: only the @aztec-labs packages local to the workspace being released are
 # co-published right now and get $version; every other first-party dependency is an external pin
@@ -53,6 +61,12 @@ elif [ "$check_only" -eq 0 ]; then
     # Update each dependency @aztec package version in package.json.
     for pkg in $(jq --raw-output "(.$deps // {}) | keys[] | select(startswith(\"@aztec/\") or startswith(\"@aztec-labs/\") or startswith(\"@aztec-foundation/\"))" package.json); do
       jq --arg v $version ".$deps[\"$pkg\"] = \$v" package.json >$tmp
+      mv $tmp package.json
+    done
+    # Noir's packages are released under @aztec-foundation/noir-*, at the same version.
+    for pkg in $(jq --raw-output "(.$deps // {}) | keys[] | select(startswith(\"@noir-lang/\"))" package.json); do
+      jq --arg v "$version" --arg old "$pkg" --arg new "@aztec-foundation/noir-${pkg#@noir-lang/}" \
+        ".$deps[\$new] = \$v | del(.$deps[\$old])" package.json >$tmp
       mv $tmp package.json
     done
   done
