@@ -15,6 +15,11 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - name: Signal dispositions (temporary diagnostic)
+        run: |
+          echo "step shell:   $(grep -E 'SigIgn|SigBlk' /proc/$$/status | tr '\n' ' ')"
+          echo "step parent:  $(grep -E 'Name|SigIgn' /proc/$PPID/status | tr '\n' ' ')"
+          echo "child:        $(grep -E 'SigIgn' /proc/self/status)"
       - name: Install dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y -qq parallel lz4 pigz zstd >/dev/null
       - name: Run tests
