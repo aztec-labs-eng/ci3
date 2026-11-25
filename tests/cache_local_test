@@ -18,7 +18,12 @@ fail() { echo -e "  \033[31m✗ $1\033[0m"; ((++failed)); }
 
 setup() {
   log "Setting up test environment in $test_root"
-  mkdir -p "$test_root"/{local-cache,extract,source}
+  mkdir -p "$test_root"/{local-cache,extract,source,bin}
+
+  # An aws that has credentials but no S3 access, so uploads and downloads fail without reaching S3.
+  printf '%s\n' '#!/usr/bin/env bash' '[ "$1 $2" = "configure export-credentials" ] && exit 0' 'exit 1' >"$test_root/bin/aws"
+  chmod +x "$test_root/bin/aws"
+  export PATH="$test_root/bin:$PATH"
 
   # Create some test content to tar up.
   echo "hello world" > "$test_root/source/file1.txt"

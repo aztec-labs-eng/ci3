@@ -1,0 +1,31 @@
+name: Test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq parallel lz4 pigz zstd >/dev/null
+      - name: Run tests
+        # Each test runs with no redis and stubs what it calls out to, so the runner needs no credentials.
+        run: |
+          failed=()
+          for t in tests/*_test; do
+            echo "::group::$t"
+            if "$t"; then echo "::endgroup::"; else echo "::endgroup::"; echo "::error::$t failed"; failed+=("$t"); fi
+          done
+          echo "::group::semver test"
+          ./semver test || failed+=("semver test")
+          echo "::endgroup::"
+          if [ ${#failed[@]} -gt 0 ]; then echo "Failed: ${failed[*]}"; exit 1; fi

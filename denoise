@@ -145,12 +145,17 @@ if [ -n "${publish_pid:-}" ]; then
 fi
 publish_log_final
 
-# Kill tail (source), EOF propagates through fifo, dots loop drains and exits.
-kill $tail_pid &>/dev/null
-wait $tail_pid 2>/dev/null
-tail_pid=
-wait $dots_pid 2>/dev/null
-dots_pid=
+# Kill tail (source), EOF propagates through fifo, dots loop drains and exits. On a signal, cleanup
+# has already stopped both and cleared their pids, and a bare `wait` would wait for every child.
+if [ -n "${tail_pid:-}" ]; then
+  kill $tail_pid &>/dev/null
+  wait $tail_pid 2>/dev/null
+  tail_pid=
+fi
+if [ -n "${dots_pid:-}" ]; then
+  wait $dots_pid 2>/dev/null
+  dots_pid=
+fi
 
 # Handle non-zero exit status
 if [ "$status" -ne 0 ]; then
