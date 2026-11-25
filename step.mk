@@ -36,6 +36,13 @@ define step
 	  $(CI3)/color_prefix $(1) "$(CI3)/step $(1) '$(3)' '$(4)' $^"
 endef
 
+# $(call step_tests,<target>,<project dir>[,<test_cmds arguments>]): lists the project's tests for the test engine,
+# keyed like a step: ./bootstrap.sh test_cmds prefixes each with $STEP_KEY.
+define step_tests
+	@cd $(ROOT)/$(2) && INPUTS='$(INPUTS)' AFTER='$|' KEY_ENV='$(KEY_ENV)' KEY_SALT='$(KEY_SALT)' \
+	  $(CI3)/color_prefix $(1) "$(CI3)/step $(1) 'test_cmds $(3)' tests $^"
+endef
+
 # $(call step_group,<target>): a target that only groups its prerequisites; its key is theirs.
 define step_group
 	@$(CI3)/step $(1) - never $^

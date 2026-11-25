@@ -202,6 +202,7 @@ function label {
       ;;
     miss) ((++counts_build)); lbl="${yellow}BUILD${reset}  $(why "$t")" ;;
     never) ((++counts_always)); lbl="always runs" ;;
+    tests) lbl="lists its tests" ;;
     disabled) ((++counts_uncached)); lbl="${yellow}uncached${reset}  $(why_uncached "$t")" ;;
     group) ;;
   esac

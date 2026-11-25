@@ -53,6 +53,10 @@ EOF
 cat >b/bootstrap.sh <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+if [ "$1" = test_cmds ]; then
+  echo "$STEP_KEY cd b && grep -q B b/src.txt"
+  exit 0
+fi
 echo "b $1" >>"$RUNS"
 { cat ../a/ci3-out/a/a.txt ../l/out/l.txt src.txt; echo "STEP_KEY=$STEP_KEY CI3_KEY_A=$CI3_KEY_A CI3_KEY_L=$CI3_KEY_L"; } >"$STEP_OUT/b.txt"
 EOF
@@ -72,6 +76,7 @@ esac
 EOF
 chmod +x */bootstrap.sh
 printf '%s\n' 'out/' 'ci3-out/' >.gitignore
+echo 'tests: []' >.test_patterns.yml
 
 {
   echo 'SHELL := /bin/bash'
@@ -93,6 +98,9 @@ printf '%s\n' 'out/' 'ci3-out/' >.gitignore
   echo 'b: private INPUTS := b/.rebuild_patterns'
   echo 'b: a l | c'
   printf '\t$(call step,$@,b,build)\n'
+  echo 'b-tests: private INPUTS := b/.rebuild_patterns'
+  echo 'b-tests: b'
+  printf '\t$(call step_tests,$@,b)\n'
 } >Makefile
 git add -A
 git commit -qm init
@@ -182,6 +190,18 @@ plan=$("$ci3/step_plan" all 2>&1 | sed 's/\x1b\[[0-9;]*m//g' || true)
 check "plan says the step with changes is uncached" 'grep -qE "a  -  uncached  uncommitted changes to its inputs" <<<"$plan"'
 check "and what uses it is cached if a builds to the same outputs" 'grep -qE "b  [0-9a-f]+  cached if a unchanged" <<<"$plan"'
 git checkout -q a/src.txt
+
+echo "step_tests"
+export CI3_TEST_CMDS_FILE="$tmp/test_cmds"
+rm -f "$CI3_TEST_CMDS_FILE"
+make -s b-tests >"$tmp/make.log" 2>&1 || cat "$tmp/make.log"
+keys=$(mktemp -d)
+CI3_KEYS_ONLY=1 CI3_KEYS_DIR=$keys make -s b-tests >/dev/null 2>&1
+check "test commands are prefixed with the test target's key" \
+  'grep -qxF "$(<"$keys/b-tests"):MAKEFILE_TARGET=b cd b && grep -q B b/src.txt" "$CI3_TEST_CMDS_FILE"'
+check "which comes from b's outputs" 'grep -qx "b=$(<"$keys/b.out")" "$keys/b-tests.parts"'
+check "keys-only mode lists no tests" '[ "$(wc -l <"$CI3_TEST_CMDS_FILE")" -eq 1 ]'
+rm -rf "$keys"
 
 echo
 echo "step_test: $passed passed, $failed failed"

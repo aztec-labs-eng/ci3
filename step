@@ -31,6 +31,9 @@
 #
 # <outputs> is otherwise empty, except:
 #   never       always runs, as for a command that caches per item itself
+#   tests       always runs `./bootstrap.sh <command>`, which prints test commands, each prefixed with the
+#               key they are cached under: $STEP_KEY, rather than a hash of the bootstrap's own. They go
+#               through filter_test_cmds to the test engine's file, CI3_TEST_CMDS_FILE (/tmp/test_cmds).
 #   <paths...>  transitional, for tools that keep their outputs in working directories of their own: these
 #               paths, relative to the project, are cached and restored in place instead of $STEP_OUT
 # A <bootstrap command> of - runs nothing: the target only groups its prerequisites (see step_group).
@@ -133,6 +136,8 @@ if [ "${CI3_KEYS_ONLY:-0}" -eq 1 ]; then
     status=group
   elif [ "$outputs" = never ]; then
     status=never
+  elif [ "$outputs" = tests ]; then
+    status=tests
   else
     guess=
     if [ "$key" = disabled-cache ]; then
@@ -169,6 +174,11 @@ if [ "${CI3_KEYS_ONLY:-0}" -eq 1 ]; then
 fi
 
 export STEP_KEY=$key
+if [ "$outputs" = tests ]; then
+  export MAKEFILE_TARGET=$target
+  ./bootstrap.sh $command | filter_test_cmds | atomic_append "${CI3_TEST_CMDS_FILE:-/tmp/test_cmds}"
+  exit 0
+fi
 if [ "$command" = - ] || [ "$outputs" = never ]; then
   [ "$command" = - ] || denoise "./bootstrap.sh $command"
   exit 0
