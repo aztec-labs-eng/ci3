@@ -22,13 +22,17 @@ function cleanup {
     wait $publish_pid
     publish_pid=
   fi
-  # Stops the command, not the redact at the end of its pipeline, which then drains what the command
-  # wrote before it stopped. A command that should clean up on the way, such as bootstrap_ec2, must
-  # be the process that shell runs: give it as `exec <command>`.
+  # The signal goes to the shell running the command. A command that should clean up on the way,
+  # such as bootstrap_ec2, must be that process: give it as `exec <command>`. redact is left to
+  # drain what the command wrote before it stopped.
   if [ -n "${job_pid:-}" ]; then
-    kill $(cat "$cmd_pidfile" 2>/dev/null) &>/dev/null
+    kill $job_pid &>/dev/null
     wait $job_pid
     job_pid=
+  fi
+  if [ -n "${redact_pid:-}" ]; then
+    wait $redact_pid
+    redact_pid=
   fi
   if [ -n "${tail_pid:-}" ]; then
     kill $tail_pid &>/dev/null
@@ -43,7 +47,7 @@ function cleanup {
 }
 trap cleanup SIGINT SIGTERM
 # Remove file on exit, so we can publish even after SIGINT or SIGTERM.
-trap 'cleanup; rm -f $outfile $dots_fifo $cmd_pidfile' EXIT
+trap 'cleanup; rm -f $outfile $dots_fifo' EXIT
 
 dots_per_line=${DENOISE_WIDTH:-64}
 dot_count=0
@@ -128,14 +132,20 @@ while IFS= read -r line; do
 done < "$dots_fifo" &
 dots_pid=$!
 
-# Execute the command in background. The shell that runs it records its pid for cleanup.
-cmd_pidfile=$(mktemp)
-PARENT_LOG_ID=$key bash -c 'echo $$ > "$0"; set -euo pipefail; eval "$1"' "$cmd_pidfile" "$cmd" 2>&1 | redact > $outfile &
+# Execute the command in background. Its output reaches redact through a process substitution rather
+# than a pipeline, so that $! is the command's shell, which cleanup signals, not redact.
+exec {redact_fd}> >(redact > $outfile)
+redact_pid=$!
+PARENT_LOG_ID=$key bash -c "set -euo pipefail; $cmd" >&$redact_fd 2>&1 &
 job_pid=$!
+exec {redact_fd}>&-
 
-# Wait for the job to finish and get its exit status.
+# Wait for the job to finish and get its exit status, then for redact to finish writing its output.
 wait $job_pid
 status=$?
+job_pid=
+wait $redact_pid
+redact_pid=
 
 time="${SECONDS}s"
 if [ -n "${publish_pid:-}" ]; then

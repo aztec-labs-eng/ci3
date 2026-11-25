@@ -130,7 +130,5 @@ for attempt in $(seq 1 $max_attempts); do
 done
 # At this point we know it's started, and can handle SIGTERM to kill the container.
 
-# Output logs, but use & so we can still handle signals.
-docker logs -f $cid &
-wait $!
+interruptible docker logs -f $cid
 exit $(docker wait $cid)
