@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Steps (step, step_legacy, step_plan, step.mk) on a toy repository with a local cache.
 #
-#   a  step: builds out/a.txt from its source
-#   c  step: a check (outputs -), which b runs after (order-only), so not part of b's key
+#   a  step: builds out/a.txt from its source, after c (only order-only prerequisites)
+#   c  step: a check (outputs -), which a and b run after (order-only), so not part of their keys
 #   l  not a step: a recipe run through step_legacy, keyed by its ./bootstrap.sh hash
 #   b  step: uses a's and l's outputs, so both are in its key
 #
@@ -81,7 +81,7 @@ printf '%s\n' 'out/' >.gitignore
   echo '.PHONY: all a b c l'
   echo 'all: b'
   echo 'a: private INPUTS := a/.rebuild_patterns'
-  echo 'a:'
+  echo 'a: | c'
   printf '\t$(call step,$@,a,build,out)\n'
   echo 'c: private INPUTS := c/.rebuild_patterns'
   echo 'c:'
@@ -142,6 +142,8 @@ echo "$plan" | sed 's/^/    /'
 check "plan names the input that changed" 'grep -qE "^.*a  [0-9a-f]+  BUILD  changed: a/src.txt" <<<"$plan"'
 check "plan says b builds because a changed" 'grep -qE "b  [0-9a-f]+  BUILD  a changed" <<<"$plan"'
 check "plan marks the check as running first, cached" 'grep -qE "c \(runs first\)  [0-9a-f]+  cached" <<<"$plan"'
+check "plan tells order-only from normal prerequisites when a step has only order-only ones" \
+  '[ "$(grep -cE "c \(runs first\)" <<<"$plan")" -eq 2 ]'
 check "plan shows the legacy prerequisite as not a step" 'grep -qE "l  +not a step" <<<"$plan"'
 check "planning built nothing" '[ ! -s "$RUNS" ]'
 rm -f "$CACHE_LOCAL_DIR"/a-*

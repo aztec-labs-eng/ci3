@@ -29,7 +29,8 @@ if ! CI3_KEYS_ONLY=1 CI3_PLAN=1 CI3_KEYS_DIR=$keys make -s -j"$(get_num_cpus)" $
   exit 1
 fi
 
-# The graph, from make's database: one line per target, "<target>\t<prerequisites>\t<order-only>".
+# The graph, from make's database: one line per target, "<target>,<prerequisites>,<order-only>" (a comma, not
+# a tab: read collapses runs of IFS whitespace, so an empty field would shift the next into its place).
 # make -q exits 1 when the goal is out of date, as phony targets always are: only its output matters.
 make_db=$(CI3_KEYS_DIR=$keys make -rpq $goal 2>/dev/null || true)
 awk '
@@ -43,12 +44,12 @@ awk '
     if (rest ~ /=/) next                     # a target-specific variable, not a rule
     n = index(rest, "|"); normal = n ? substr(rest, 1, n - 1) : rest; after = n ? substr(rest, n + 1) : ""
     gsub(/^ +| +$/, "", normal); gsub(/^ +| +$/, "", after)
-    print t "\t" normal "\t" after
+    print t "," normal "," after
   }' <<<"$make_db" >"$keys/.graph"
 [ -n "$goal" ] || goal=$(awk -F' := ' '/^\.DEFAULT_GOAL :=/ { print $2; exit }' <<<"$make_db")
 
 declare -A normal_of after_of
-while IFS=$'\t' read -r t normal after; do
+while IFS=, read -r t normal after; do
   normal_of[$t]=$normal
   after_of[$t]=$after
 done <"$keys/.graph"
