@@ -102,16 +102,19 @@ once, in the Makefile (ci3#25).
 ```make
 include $(ROOT)/ci3/step.mk
 
-l1-contracts-src: private INPUTS := l1-contracts/.rebuild_patterns
-l1-contracts-src: l1-contracts-solc | l1-contracts-format-check
-	$(call step,$@,l1-contracts,build_src,out cache)
+avm-transpiler-native: private INPUTS := avm-transpiler/.rebuild_patterns
+avm-transpiler-native: | noir-format-check
+	$(call step,$@,avm-transpiler,build_native)
 ```
 
 - A step's key hashes its target name, its `INPUTS` (rebuild patterns), any `KEY_ENV` values and `KEY_SALT`,
   `CI3_TOOLCHAIN_ID`, and the key of each normal prerequisite. Order-only prerequisites (after `|`) run first
   but are not part of the key.
-- On a hit its outputs are restored from `<target>-<key>.tar.gz`; on a miss it runs `./bootstrap.sh <command>`
-  and uploads them. Outputs `-` cache a check's pass; `never` always runs, for a command that caches per item
+- Every step writes its outputs to `$STEP_OUT`, `<project>/ci3-out/<target>`, and whatever uses them reads
+  them there: one place, whatever the tool. That directory is what is cached, as `<target>-<key>.tar.gz`, with
+  the key stamped in it. When the stamp matches, nothing runs ("up to date"); on a hit it is restored, in one
+  line of log; otherwise `./bootstrap.sh <command>` runs and the directory is uploaded. A check writes nothing,
+  and its cached stamp records the pass. A step marked `never` always runs, for a command that caches per item
   using `STEP_KEY` and the `CI3_KEY_<PREREQUISITE>` variables.
 - A recipe that is not a step yet runs through `step_legacy`; steps that depend on it are keyed by its
   project's `./bootstrap.sh hash`. A Makefile moves to steps one target at a time.
@@ -153,6 +156,7 @@ The dependency runs both ways. ci3 reads these from the repository it is buildin
 - `.test_patterns.yml` — test skips, retries, owners and Slack notifications (`filter_test_cmds`, `run_test_cmd`).
 - `scripts/process_flake_log.py` — optional; run by `parallelize` after a test run when present.
 - `build-images/src/home/.gitconfig` — mounted into containers by `docker_isolate`.
+- `ci3-out/` in `.gitignore`, with steps: where each step's outputs are written.
 - `CI3_TOOLCHAIN_ID` — optional; with steps, what builds the outputs (such as the build image's digest), so a new toolchain rebuilds every step.
 - `CI3_EVENT_ENDPOINT`, `CI3_EVENT_TOKEN` and `CI3_EVENT_PROJECT` — optional; when all are set, `bootstrap_ec2` sends a `ci.instance` event per build instance through `send_event` to that OTLP endpoint, for example `https://otel.aztec-labs.com`.
 - **Permission to renew a build instance's lease.** Each build instance shuts itself down, and so terminates, once its `LeaseUntil` tag has passed, and whoever launched it renews that tag every minute while it runs (`internal/source_instance_lease`). The AWS role that launches instances, in CI and on a build instance launching another (such as the benchmark box), needs `ec2:CreateTags` for the `LeaseUntil` key on instances tagged `Group=build-instance`. Without it, every instance shuts down 10 minutes after boot.

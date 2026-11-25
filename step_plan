@@ -5,6 +5,7 @@
 #
 # It runs make in keys-only mode (see step): every step works out its key and asks the cache whether it
 # is there, and nothing is built, downloaded or uploaded. Then it prints the goal's dependency tree:
+#   up to date its outputs ($STEP_OUT) are already there for this key: nothing runs
 #   cached     the key is in the cache: it will be restored, not built
 #   BUILD      it is not, with why, against the record of the target's last build (internal/source_step):
 #              which of its inputs changed since that commit, or which prerequisite, setting or toolchain
@@ -172,7 +173,7 @@ function steps_below {
 }
 
 declare -A shown
-counts_cached=0 counts_build=0 counts_always=0 counts_uncached=0
+counts_current=0 counts_cached=0 counts_build=0 counts_always=0 counts_uncached=0
 # Sets lbl to what the plan says about a target, and counts it.
 function label {
   local t=$1
@@ -182,6 +183,7 @@ function label {
     return 0
   fi
   case $(<"$keys/$t.status") in
+    current) ((++counts_current)); lbl="${green}up to date${reset}" ;;
     hit) ((++counts_cached)); lbl="${green}cached${reset}" ;;
     miss) ((++counts_build)); lbl="${yellow}BUILD${reset}  $(why "$t")" ;;
     never) ((++counts_always)); lbl="always runs" ;;
@@ -225,4 +227,7 @@ if relevant "$goal"; then
 else
   echo "  (no steps)"
 fi
-echo "Steps: $counts_build to build, $counts_cached cached, $counts_always always run, $counts_uncached uncached."
+# Targets that are not steps decide for themselves whether to build, so the plan cannot say.
+not_steps=$(find "$keys" -maxdepth 1 -name '*.legacy' | wc -l)
+[ "$not_steps" -eq 0 ] || echo "Not planned: $not_steps targets that are not steps yet, which check their own caches when they run."
+echo "Steps: $counts_build to build, $counts_cached cached, $counts_current up to date, $counts_always always run, $counts_uncached uncached."

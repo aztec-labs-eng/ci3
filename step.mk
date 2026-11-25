@@ -4,9 +4,12 @@
 #   include $(ROOT)/ci3/step.mk
 #
 # A step names its own inputs, and make's graph supplies the rest of its key:
-#   l1-contracts-src: private INPUTS := l1-contracts/.rebuild_patterns
-#   l1-contracts-src: l1-contracts-solc | l1-contracts-format-check
-#   	$(call step,$@,l1-contracts,build_src,out cache)
+#   avm-transpiler-native: private INPUTS := avm-transpiler/.rebuild_patterns
+#   avm-transpiler-native: | noir-format-check
+#   	$(call step,$@,avm-transpiler,build_native)
+#
+# The command writes its outputs to $STEP_OUT (<project>/ci3-out/<target>), which is what is cached, and what
+# anything using them reads. The repository's .gitignore needs ci3-out/.
 #
 # - Normal prerequisites (before |) are part of the key: the step uses what they produce.
 # - Order-only prerequisites (after |) only run first, as a check or a warm-up does.
@@ -23,10 +26,11 @@ CI3_KEYS_DIR := $(shell mktemp -d "$${TMPDIR:-/tmp}/ci3-keys.XXXXXX")
 endif
 export CI3_KEYS_DIR
 
-# $(call step,<target>,<project dir>,<bootstrap command>,<outputs>)
+# $(call step,<target>,<project dir>,<bootstrap command>[,never | <paths>])
 #   <project dir>        relative to ROOT
 #   <bootstrap command>  run as ./bootstrap.sh <bootstrap command> on a cache miss
-#   <outputs>            paths restored on a hit, relative to the project; - for a check; never to always run
+#   never                always run, for a command that caches per item itself
+#   <paths>              transitional: cache these paths in the project instead of $STEP_OUT (see ci3/step)
 define step
 	@cd $(ROOT)/$(2) && INPUTS='$(INPUTS)' AFTER='$|' KEY_ENV='$(KEY_ENV)' KEY_SALT='$(KEY_SALT)' \
 	  $(CI3)/color_prefix $(1) "$(CI3)/step $(1) '$(3)' '$(4)' $^"

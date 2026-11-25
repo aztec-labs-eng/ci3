@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Steps (step, step_legacy, step_plan, step.mk) on a toy repository with a local cache.
 #
-#   a  step: builds out/a.txt from its source, after c (only order-only prerequisites)
+#   a  step: builds $STEP_OUT/a.txt from its source, after c (only order-only prerequisites)
 #   c  step: a check (outputs -), which a and b run after (order-only), so not part of their keys
-#   l  not a step: a recipe run through step_legacy, keyed by its ./bootstrap.sh hash
+#   l  not a step: a recipe run through step_legacy, keyed by its ./bootstrap.sh hash, writing l/out
 #   b  step: uses a's and l's outputs, so both are in its key
 #
 # Each project's bootstrap.sh logs what it ran to runs.log, which is what the cases check.
@@ -46,13 +46,13 @@ cat >a/bootstrap.sh <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 echo "a $1" >>"$RUNS"
-mkdir -p out && tr a-z A-Z <src.txt >out/a.txt
+tr a-z A-Z <src.txt >"$STEP_OUT/a.txt"
 EOF
 cat >b/bootstrap.sh <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 echo "b $1" >>"$RUNS"
-mkdir -p out && { cat ../a/out/a.txt ../l/out/l.txt src.txt; echo "STEP_KEY=$STEP_KEY CI3_KEY_A=$CI3_KEY_A CI3_KEY_L=$CI3_KEY_L"; } >out/b.txt
+{ cat ../a/ci3-out/a/a.txt ../l/out/l.txt src.txt; echo "STEP_KEY=$STEP_KEY CI3_KEY_A=$CI3_KEY_A CI3_KEY_L=$CI3_KEY_L"; } >"$STEP_OUT/b.txt"
 EOF
 cat >c/bootstrap.sh <<'EOF'
 #!/usr/bin/env bash
@@ -69,7 +69,7 @@ case "$1" in
 esac
 EOF
 chmod +x */bootstrap.sh
-printf '%s\n' 'out/' >.gitignore
+printf '%s\n' 'out/' 'ci3-out/' >.gitignore
 
 {
   echo 'SHELL := /bin/bash'
@@ -82,23 +82,25 @@ printf '%s\n' 'out/' >.gitignore
   echo 'all: b'
   echo 'a: private INPUTS := a/.rebuild_patterns'
   echo 'a: | c'
-  printf '\t$(call step,$@,a,build,out)\n'
+  printf '\t$(call step,$@,a,build)\n'
   echo 'c: private INPUTS := c/.rebuild_patterns'
   echo 'c:'
-  printf '\t$(call step,$@,c,build,-)\n'
+  printf '\t$(call step,$@,c,build)\n'
   echo 'l:'
   printf "\t\$(call run_command,\$@,l,./bootstrap.sh build)\n"
   echo 'b: private INPUTS := b/.rebuild_patterns'
   echo 'b: a l | c'
-  printf '\t$(call step,$@,b,build,out)\n'
+  printf '\t$(call step,$@,b,build)\n'
 } >Makefile
 git add -A
 git commit -qm init
 
 export RUNS="$tmp/runs.log"
-# Runs make from clean outputs, and prints what the bootstrap scripts ran, sorted.
+# Runs make from clean outputs (warm: from the outputs already there), and prints what the bootstrap scripts
+# ran, sorted.
 function build {
-  rm -rf a/out b/out l/out "$RUNS"
+  [ "${1:-}" = warm ] && shift || rm -rf {a,b,c}/ci3-out l/out
+  rm -f "$RUNS"
   touch "$RUNS"
   make -s "$@" >"$tmp/make.log" 2>&1 || { cat "$tmp/make.log"; return 1; }
   sort "$RUNS" | paste -sd' ' -
@@ -111,11 +113,13 @@ function commit {
 echo "step: building"
 check "a cold build runs everything" '[ "$(build)" = "a build b build c build l build" ]'
 check "b's command sees its own key and each prerequisite's" \
-  'grep -qE "STEP_KEY=[0-9a-f]{16} CI3_KEY_A=[0-9a-f]{16} CI3_KEY_L=legacy-[0-9a-f]{40}$" b/out/b.txt'
+  'grep -qE "STEP_KEY=[0-9a-f]{16} CI3_KEY_A=[0-9a-f]{16} CI3_KEY_L=legacy-[0-9a-f]{40}$" b/ci3-out/b/b.txt'
 check "outputs are cached as <target>-<key>.tar.gz" 'ls "$CACHE_LOCAL_DIR" | grep -qE "^b-[0-9a-f]{16}\.tar\.gz$"'
 check "nothing changed: steps are restored, the check is skipped, only the legacy recipe runs" '[ "$(build)" = "l build" ]'
-check "a restored step has its outputs" 'grep -q "A V1" b/out/b.txt'
-check "a cached check leaves nothing behind in its project" '[ -z "$(git status --porcelain)" ]'
+check "a restored step has its outputs" 'grep -q "A V1" b/ci3-out/b/b.txt'
+check "a hit is one line" '[ "$(grep -c "\[a\]" "$tmp/make.log")" -eq 1 ] && grep -q "a: restored from the cache" "$tmp/make.log"'
+check "outputs already there for the key: nothing runs, nothing is restored" '[ "$(build warm)" = "l build" ] && grep -q "a: up to date" "$tmp/make.log"'
+check "outputs leave the work tree clean" '[ -z "$(git status --porcelain)" ]'
 
 commit c "c v2"
 check "a changed check reruns, and b, which only runs after it, is restored" '[ "$(build)" = "c build l build" ]'
@@ -129,12 +133,16 @@ keys=$(mktemp -d)
 check "keys-only mode runs nothing" '[ -z "$(CI3_KEYS_ONLY=1 CI3_KEYS_DIR=$keys build)" ]'
 check "keys-only mode records every step's key" '[ -s "$keys/a" ] && [ -s "$keys/b" ] && [ -s "$keys/c" ]'
 build >/dev/null
-check "the keys are the ones a build uses" 'grep -q "STEP_KEY=$(<"$keys/b") " b/out/b.txt'
+check "the keys are the ones a build uses" 'grep -q "STEP_KEY=$(<"$keys/b") " b/ci3-out/b/b.txt'
 rm -rf "$keys"
 
 echo "step_plan"
 plan=$("$ci3/step_plan" all 2>&1 | sed 's/\x1b\[[0-9;]*m//g' || true)
-check "everything built: all cached" 'grep -q "Steps: 0 to build, 3 cached" <<<"$plan"'
+check "everything built and in place: all up to date" 'grep -q "Steps: 0 to build, 0 cached, 3 up to date" <<<"$plan"'
+check "plan counts the targets it cannot plan" 'grep -q "Not planned: 1 targets" <<<"$plan"'
+rm -rf {a,b,c}/ci3-out
+plan=$("$ci3/step_plan" all 2>&1 | sed 's/\x1b\[[0-9;]*m//g' || true)
+check "outputs gone: all cached" 'grep -q "Steps: 0 to build, 3 cached" <<<"$plan"'
 commit a "a v3"
 : >"$RUNS"
 plan=$("$ci3/step_plan" all 2>&1 | sed 's/\x1b\[[0-9;]*m//g' || true)
@@ -148,7 +156,7 @@ check "plan shows the legacy prerequisite as not a step" 'grep -qE "l  +not a st
 check "planning built nothing" '[ ! -s "$RUNS" ]'
 rm -f "$CACHE_LOCAL_DIR"/a-*
 build >/dev/null
-rm -f "$CACHE_LOCAL_DIR"/a-*
+rm -rf "$CACHE_LOCAL_DIR"/a-* a/ci3-out
 plan=$("$ci3/step_plan" all 2>&1 | sed 's/\x1b\[[0-9;]*m//g' || true)
 check "plan tells an evicted key from a changed one" 'grep -q "but no longer in the cache" <<<"$plan"'
 

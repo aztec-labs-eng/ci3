@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs one step of a build: a make target whose cache key ci3 derives from the make dependency graph.
 #
-#   step <target> <bootstrap command> <outputs> [prerequisite...]
+#   step <target> <bootstrap command> [<outputs>] [prerequisite...]
 #
 # The `step` macro in step.mk calls it from the project's directory, with the target's normal prerequisites
 # ($^) as arguments, and these in the environment:
@@ -19,10 +19,18 @@
 # A prerequisite that is not a step yet (a recipe run through step_legacy) is keyed by its project's
 # `./bootstrap.sh hash`.
 #
-# <outputs>, relative to the project directory, are what a cache hit restores:
-#   <paths...>  cached together as <target>-<key>.tar.gz
-#   -           nothing to restore, as for a check: a pass is cached, and a cached pass skips the command
+# Outputs: the command writes what it produces to $STEP_OUT, <project>/ci3-out/<target>, which step empties
+# first, and anything that uses it reads it from there. That directory is what is cached, as
+# <target>-<key>.tar.gz, with the key stamped in it as .key:
+#   - the stamp matches the key: the outputs are already there, and nothing runs ("up to date")
+#   - the key is in the cache: it is restored, and nothing runs
+#   - otherwise the command runs, and its outputs are uploaded
+# A check writes nothing to $STEP_OUT: its cached stamp records the pass. The repository ignores ci3-out/.
+#
+# <outputs> is otherwise empty, except:
 #   never       always runs, as for a command that caches per item itself
+#   <paths...>  transitional, for tools that keep their outputs in working directories of their own: these
+#               paths, relative to the project, are cached and restored in place instead of $STEP_OUT
 # A <bootstrap command> of - runs nothing: the target only groups its prerequisites (see step_group).
 #
 # The command runs as `./bootstrap.sh <bootstrap command>` under denoise. After an upload, the key and its
@@ -34,11 +42,12 @@ NO_CD=1 source $(dirname "${BASH_SOURCE[0]}")/source
 source $ci3/internal/source_step
 
 if [ "$#" -lt 3 ]; then
-  echo_stderr "Usage: step <target> <bootstrap command> <outputs> [prerequisite...]"
+  echo_stderr "Usage: step <target> <bootstrap command> <outputs or ''> [prerequisite...]"
   exit 1
 fi
 target=$1 command=$2 outputs=$3
 shift 3
+out_rel=ci3-out/$target
 keys=${CI3_KEYS_DIR:?step: CI3_KEYS_DIR is not set. Include ci3/step.mk in the Makefile.}
 
 # Prints a prerequisite's key. A step recorded its own. One still run by step_legacy is keyed by its
@@ -89,6 +98,11 @@ echo "$key" >"$keys/$target"
 
 artifact=$target-$key.tar.gz
 
+# Whether $STEP_OUT already holds this key's outputs.
+function up_to_date {
+  [ -z "$outputs" ] && [ "$key" != disabled-cache ] && [ "$(cat "$out_rel/.key" 2>/dev/null)" = "$key" ]
+}
+
 if [ "${CI3_KEYS_ONLY:-0}" -eq 1 ]; then
   if [ "${CI3_PLAN:-0}" -eq 1 ]; then
     if [ "$command" = - ]; then
@@ -97,6 +111,8 @@ if [ "${CI3_KEYS_ONLY:-0}" -eq 1 ]; then
       status=never
     elif [ "$key" = disabled-cache ]; then
       status=disabled
+    elif up_to_date; then
+      status=current
     elif cache_exists "$artifact"; then
       status=hit
     else
@@ -110,26 +126,38 @@ fi
 [ "$command" = - ] && exit 0
 export STEP_KEY=$key
 
-# --- Restore, or build and upload --------------------------------------------------------------------------
-# A check's pass flag goes through a directory of its own, so nothing is left in the project.
-flag_dir=
-if [ "$outputs" = - ]; then
-  flag_dir=$(mktemp -d)
-  trap 'rm -rf "$flag_dir"' EXIT
-fi
-
-if [ "$outputs" != never ] && cache_download "$artifact" ${flag_dir:+"$flag_dir"}; then
-  echo "$target: restored from the cache ($key)."
+if [ "$outputs" = never ]; then
+  denoise "./bootstrap.sh $command"
   exit 0
 fi
 
+# --- Up to date, restore, or build and upload --------------------------------------------------------------
+if up_to_date; then
+  echo "$target: up to date ($key)."
+  exit 0
+fi
+
+# A hit is one line: cache_download's own account only matters when the download fails, and a miss is not
+# a failure.
+[ -z "$outputs" ] && rm -rf "$out_rel"
+start=$SECONDS
+if cache_download "$artifact" &>/dev/null; then
+  echo "$target: restored from the cache ($key) in $((SECONDS - start))s."
+  exit 0
+fi
+
+if [ -z "$outputs" ]; then
+  mkdir -p "$out_rel"
+  export STEP_OUT=$PWD/$out_rel
+fi
 denoise "./bootstrap.sh $command"
 
-case "$outputs" in
-  never) exit 0 ;;
-  -) touch "$flag_dir/passed"; (cd "$flag_dir" && cache_upload "$artifact" passed) ;;
-  *) cache_upload "$artifact" $outputs ;;
-esac
+if [ -z "$outputs" ]; then
+  echo "$key" >"$out_rel/.key"
+  cache_upload "$artifact" "$out_rel"
+else
+  cache_upload "$artifact" $outputs
+fi
 
 # cache_upload succeeds whether or not it uploaded (outside CI, an existing key, no credentials), so record
 # the build only once the artifact is there to be found.
