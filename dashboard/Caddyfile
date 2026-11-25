@@ -3,13 +3,59 @@
 	admin off
 }
 
-ci.aztec-labs.com {
-	encode zstd gzip
+(app) {
 	# Long timeouts: the dashboard streams/long-polls live logs.
 	reverse_proxy rkapp:8080 {
 		transport http {
 			read_timeout 3600s
 			write_timeout 3600s
+		}
+	}
+}
+
+# Asks oauth2-proxy whether the request is signed in, by session cookie or bearer token, and
+# passes its email to the app. The app trusts that header, so a client's own copy is dropped
+# first; `route` keeps that order, which Caddy would otherwise rearrange.
+(auth) {
+	request_header -X-Auth-Request-Email
+	forward_auth oauth2-proxy:4180 {
+		uri /oauth2/auth
+		header_up X-Real-IP {remote_host}
+		copy_headers X-Auth-Request-Email
+		{block}
+	}
+}
+
+ci.aztec-labs.com {
+	encode zstd gzip
+
+	# Sign-in pages and the provider's callback, reachable without a session.
+	handle /oauth2/* {
+		reverse_proxy oauth2-proxy:4180 {
+			header_up X-Real-IP {remote_host}
+			header_up X-Forwarded-Uri {uri}
+		}
+	}
+
+	# A script sent a token: a refusal stays a 401 rather than a redirect to a sign-in page.
+	@bearer header Authorization *
+	handle @bearer {
+		route {
+			import auth
+			import app
+		}
+	}
+
+	# A browser without a session is sent to sign in, and back here afterwards.
+	handle {
+		route {
+			import auth {
+				@signin status 401
+				handle_response @signin {
+					redir * /oauth2/sign_in?rd={scheme}://{host}{uri}
+				}
+			}
+			import app
 		}
 	}
 }
