@@ -1,0 +1,51 @@
+# Build instance leases.
+#
+# Every build instance shuts itself down, and so terminates, once its lease runs out. The lease is the
+# time in the instance's LeaseUntil tag. Whoever launched the instance keeps renewing it while it is
+# alive (internal/aws_instance_lease), so an instance outlives its launcher by at most one lease period,
+# however the launcher ended: cancelled, killed, or on a runner that died. The renewal stops at the run's
+# deadline, so a run that goes on too long ends the same way.
+#
+# The instance reads the tag through its metadata service, which needs no credentials. A watchdog, started
+# at boot from the instance's user data, checks it every 30 seconds. It starts with a lease of 10 minutes
+# from boot, enough for the first renewal to land, and from then on keeps the latest lease it has read: if
+# it cannot read the tag, the last lease it saw still runs out. It runs as a systemd service that restarts
+# if it dies, and keeps the lease in /run, so a restart does not extend it.
+
+# Prints the watchdog. CI3_IMDS, CI3_LEASE_POLL and CI3_LEASE_STATE are for tests; nothing else should set
+# them.
+function lease_watchdog_script {
+  cat <<'WATCHDOG'
+#!/bin/sh
+imds=${CI3_IMDS:-http://169.254.169.254}
+poll=${CI3_LEASE_POLL:-30}
+state=${CI3_LEASE_STATE:-/run/ci3-lease}
+[ -s "$state" ] || echo $(($(date +%s) + ${CI3_LEASE_INITIAL:-600})) >"$state"
+lease=$(cat "$state")
+while :; do
+  token=$(curl -sf -m 5 -X PUT -H 'X-aws-ec2-metadata-token-ttl-seconds: 60' "$imds/latest/api/token")
+  tag=$(curl -sf -m 5 -H "X-aws-ec2-metadata-token: $token" "$imds/latest/meta-data/tags/instance/LeaseUntil")
+  case "$tag" in
+    '' | *[!0-9]*) ;;
+    *) lease=$tag && echo "$lease" >"$state" ;;
+  esac
+  if [ "$(date +%s)" -ge "$lease" ]; then
+    echo "ci3: the lease ran out at $(date -d "@$lease"); shutting down."
+    shutdown -h now
+    exit 0
+  fi
+  sleep "$poll"
+done
+WATCHDOG
+}
+
+# Prints the instance's user data, which installs the watchdog in /run, so it is never part of an image
+# made from the instance, and starts it.
+function lease_user_data {
+  echo '#!/bin/sh'
+  echo "cat >/run/ci3-lease-watchdog <<'WATCHDOG_EOF'"
+  lease_watchdog_script
+  echo 'WATCHDOG_EOF'
+  echo 'chmod +x /run/ci3-lease-watchdog'
+  echo 'systemd-run --unit=ci3-lease-watchdog --property=Restart=always --property=RestartSec=5 /run/ci3-lease-watchdog'
+}

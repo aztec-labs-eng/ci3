@@ -71,13 +71,28 @@ function report_instance {
     evicted="$1" >/dev/null 2>&1 &
 }
 
-# Terminates our instance, and any instance it launched, when the script exits.
+# Terminates our instance when the script exits.
 function cleanup {
   # First: a cancelled job may not live through the termination.
   report_instance false
+  stop_lease
   if [ -d "${state_dir:-}" ]; then
     aws_terminate_instance "$state_dir" >/dev/null 2>&1
   fi
+}
+
+# The instance shuts itself down unless its lease keeps being renewed (see
+# internal/source_instance_lease). This renews it until the run's deadline, AWS_SHUTDOWN_TIME from now,
+# for as long as this script is alive, whatever ends it.
+lease_pid=
+function start_lease {
+  [ "$NO_TERMINATE" -eq 1 ] && return
+  aws_instance_lease "$state_dir" $(($(date +%s) + AWS_SHUTDOWN_TIME * 60)) $$ &
+  lease_pid=$!
+}
+function stop_lease {
+  [ -n "$lease_pid" ] && kill "$lease_pid" 2>/dev/null
+  lease_pid=
 }
 
 # Cancellation. CI cancels by signalling only the process it started, so a caller must exec into this
@@ -144,6 +159,7 @@ fi
 
 # Request new instance.
 requested_at=$(date +%s)
+start_lease
 interruptible aws_request_instance "$instance_name" "$cores" "$arch" "$state_dir"
 ready_at=$(date +%s)
 sir=""
@@ -412,7 +428,6 @@ start_build() {
     -e GITHUB_ACTOR=${GITHUB_ACTOR:-} \
     -e EC2_INSTANCE_TYPE=${EC2_INSTANCE_TYPE:-unknown} \
     -e EC2_SPOT=${EC2_SPOT:-unknown} \
-    -e CI3_PARENT_INSTANCE_ID=$iid \
     -e BENCH_UPLOAD=${BENCH_UPLOAD:-} \
     -e AZTEC_TOOLCHAIN_DEFAULT_MAJOR_VERSION=${AZTEC_TOOLCHAIN_DEFAULT_MAJOR_VERSION:-} \
     -e DRY_RUN=${DRY_RUN:-} \
@@ -459,6 +474,7 @@ if [ "$exit_code" -eq 155 ]; then
   echo "Spot was evicted. Retrying with on-demand instance."
   # exec skips the EXIT trap, and the evicted instance needs no termination.
   report_instance true
+  stop_lease
   NO_SPOT=1 exec "$0" "$@"
 else
   # Print CI log URL at the end for easy access (avoid scrolling up).

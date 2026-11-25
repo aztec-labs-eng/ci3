@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Renews a build instance's lease for as long as the process that launched it is alive (see
+# internal/source_instance_lease).
+#
+#   aws_instance_lease <state dir> <deadline> <owner pid>
+#
+# Once the instance id appears in <state dir>/iid, it sets the instance's LeaseUntil tag to
+# CI3_LEASE_SECONDS (default 300) from now, every CI3_LEASE_RENEW (default 60) seconds, but never past
+# <deadline>, in seconds since the epoch. It exits once <owner pid> is gone.
+set -uo pipefail
+
+state_dir=$1
+deadline=$2
+owner=$3
+lease=${CI3_LEASE_SECONDS:-300}
+renew=${CI3_LEASE_RENEW:-60}
+export AWS_DEFAULT_REGION=us-east-2
+
+while kill -0 "$owner" 2>/dev/null; do
+  iid=$(tr -d '[:space:]' 2>/dev/null <"$state_dir/iid")
+  if [ -z "$iid" ]; then
+    sleep 1
+    continue
+  fi
+  lease_until=$(($(date +%s) + lease))
+  ((lease_until > deadline)) && lease_until=$deadline
+  if ! aws ec2 create-tags --resources "$iid" --tags "Key=LeaseUntil,Value=$lease_until" >/dev/null 2>&1; then
+    echo "aws_instance_lease: could not renew the lease of $iid." >&2
+  fi
+  sleep "$renew"
+done
