@@ -28,7 +28,10 @@ esac
 # Request new instance (ami: ubuntu 24.04 LTS). Like a build instance, it has no key pair and is driven over SSM.
 state_dir=$(mktemp -d /tmp/aws_request_instance.XXXXXX)
 trap on_exit EXIT
-AMI=$ami aws_request_instance ami_update_$arch 4 $arch $state_dir
+# Like a build instance's, its lease is renewed while this script runs (see internal/source_instance_lease).
+# create-image below reboots the instance to image it, so shutdown stays as stop rather than terminate.
+aws_instance_lease $state_dir $(($(date +%s) + ${AWS_SHUTDOWN_TIME:-60} * 60)) $$ &
+AMI=$ami AWS_SHUTDOWN_TERMINATES=0 aws_request_instance ami_update_$arch 4 $arch $state_dir
 iid=$(cat $state_dir/iid | tr -d '\n\r' | xargs)
 
 echo "Instance id: $iid"

@@ -1,0 +1,225 @@
+#!/usr/bin/env bash
+# Build instance leases (internal/source_instance_lease): the watchdog that shuts an instance down when its
+# lease runs out, run against a stub metadata service; the renewer, against a stub aws; and the launch
+# template that installs the watchdog.
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+tmp=$(mktemp -d)
+trap 'pkill -KILL -f "$tmp/" 2>/dev/null || true; rm -rf "$tmp"' EXIT
+passed=0
+failed=0
+pass() { echo -e "  \033[32m✓ $1\033[0m"; ((++passed)); }
+fail() { echo -e "  \033[31m✗ $1\033[0m"; ((++failed)); }
+now() { date +%s; }
+
+source "$script_dir/internal/source_instance_lease"
+
+# --- The watchdog ---
+#
+# The stub metadata service serves the LeaseUntil tag from $case/tag, and fails as if unreachable while
+# $case/down exists. The stub shutdown records that it ran.
+lease_watchdog_script >"$tmp/watchdog"
+mkdir -p "$tmp/wbin"
+cat >"$tmp/wbin/curl" <<'EOF'
+#!/bin/sh
+[ -e "$CASE/down" ] && exit 7
+case "$*" in
+  *api/token*) echo token ;;
+  *LeaseUntil*) [ -e "$CASE/tag" ] && cat "$CASE/tag" || exit 22 ;;
+esac
+EOF
+printf '#!/bin/sh\ndate +%%s >"$CASE/shutdown"\n' >"$tmp/wbin/shutdown"
+chmod +x "$tmp/wbin/curl" "$tmp/wbin/shutdown"
+
+# start_watchdog <case> [initial lease seconds]
+function start_watchdog {
+  mkdir -p "$tmp/$1"
+  CASE="$tmp/$1" PATH="$tmp/wbin:$PATH" CI3_IMDS=http://imds CI3_LEASE_POLL=0.2 CI3_LEASE_STATE="$tmp/$1/state" \
+    CI3_LEASE_INITIAL="${2:-600}" sh "$tmp/watchdog" >/dev/null 2>&1 & disown
+}
+# shut_down_within <case> <seconds>: whether the watchdog shuts the instance down within that time.
+function shut_down_within {
+  local deadline=$(($(now) + $2))
+  while [ "$(now)" -le "$deadline" ]; do
+    [ -e "$tmp/$1/shutdown" ] && return 0
+    sleep 0.1
+  done
+  return 1
+}
+
+mkdir -p "$tmp/w1" && echo $(($(now) + 3)) >"$tmp/w1/tag"
+start_watchdog w1
+if shut_down_within w1 1; then
+  fail "shut down while its lease still had 3s to run"
+elif shut_down_within w1 4; then
+  pass "shuts down once the lease in its tag runs out, not before"
+else
+  fail "still up 5s after a 3s lease"
+fi
+
+mkdir -p "$tmp/w2" && echo $(($(now) + 2)) >"$tmp/w2/tag"
+start_watchdog w2
+sleep 1
+echo $(($(now) + 60)) >"$tmp/w2/tag"
+if shut_down_within w2 3; then
+  fail "shut down although its lease was renewed"
+else
+  pass "a renewed lease keeps it up"
+fi
+
+start_watchdog w3 1
+if shut_down_within w3 3; then
+  pass "with no tag at all, shuts down when its initial lease runs out"
+else
+  fail "still up 3s after a 1s initial lease, with no tag"
+fi
+
+mkdir -p "$tmp/w4" && echo $(($(now) + 2)) >"$tmp/w4/tag"
+start_watchdog w4
+sleep 0.5
+touch "$tmp/w4/down"
+if shut_down_within w4 4; then
+  pass "when the metadata service stops answering, the last lease it read still runs out"
+else
+  fail "still up after its last lease ran out, with the metadata service down"
+fi
+
+mkdir -p "$tmp/w5" && echo garbage >"$tmp/w5/tag"
+start_watchdog w5 1
+if shut_down_within w5 3; then
+  pass "a tag that is not a time is ignored"
+else
+  fail "a tag that is not a time kept it up"
+fi
+
+# A restart (the service restarts if the watchdog dies) keeps the lease it had, rather than starting a
+# new initial lease.
+mkdir -p "$tmp/w6" && echo $(($(now) - 1)) >"$tmp/w6/state" && touch "$tmp/w6/down"
+start_watchdog w6 600
+if shut_down_within w6 1; then
+  pass "a restarted watchdog keeps the lease it had"
+else
+  fail "a restarted watchdog started a new lease"
+fi
+
+# --- The renewer ---
+#
+# The stub aws records each lease it is given, as "<instance> <lease>".
+mkdir -p "$tmp/rbin"
+cat >"$tmp/rbin/aws" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1 $2" = "ec2 create-tags" ]; then
+  iid=$(grep -o -- '--resources [^ ]*' <<<"$*" | cut -d' ' -f2)
+  echo "$iid $(grep -o 'Value=[0-9]*' <<<"$*" | cut -d= -f2)" >>"$CASE/leases"
+fi
+EOF
+chmod +x "$tmp/rbin/aws"
+
+# start_renewer <case> <deadline>: renews for an owner process, whose pid is in $case/owner.
+function start_renewer {
+  mkdir -p "$tmp/$1"
+  sleep 60 &
+  echo $! >"$tmp/$1/owner"
+  CASE="$tmp/$1" PATH="$tmp/rbin:$PATH" CI3_LEASE_RENEW=0.2 \
+    "$script_dir/internal/aws_instance_lease" "$tmp/$1" "$2" "$(cat "$tmp/$1/owner")" &
+  echo $! >"$tmp/$1/renewer"
+}
+
+start_renewer r1 $(($(now) + 3600))
+sleep 0.5
+if [ -s "$tmp/r1/leases" ]; then
+  fail "renewed a lease before there was an instance"
+else
+  echo i-1 >"$tmp/r1/iid"
+  sleep 0.6
+  read -r iid lease < <(tail -1 "$tmp/r1/leases" 2>/dev/null || echo "")
+  if [ "${iid:-}" = i-1 ] && [ "${lease:-0}" -ge $(($(now) + 295)) ] && [ "$lease" -le $(($(now) + 300)) ]; then
+    pass "once the instance exists, sets its lease to 5 minutes from now"
+  else
+    fail "lease after the instance appeared: '${iid:-} ${lease:-}', want i-1 and about $(($(now) + 300))"
+  fi
+fi
+
+deadline=$(($(now) + 30))
+start_renewer r2 $deadline
+echo i-2 >"$tmp/r2/iid"
+sleep 0.6
+read -r _ lease < <(tail -1 "$tmp/r2/leases" 2>/dev/null || echo "")
+if [ "${lease:-}" = "$deadline" ]; then
+  pass "never renews past the run's deadline"
+else
+  fail "lease ${lease:-none} with a deadline of $deadline"
+fi
+
+kill "$(cat "$tmp/r1/owner")"
+sleep 0.6
+if kill -0 "$(cat "$tmp/r1/renewer")" 2>/dev/null; then
+  fail "still renewing after its owner exited"
+else
+  pass "stops renewing once its owner exits"
+fi
+kill "$(cat "$tmp/r2/owner")" 2>/dev/null || true
+
+# --- The launch template ---
+#
+# aws_request_instance against a stub aws that records the launch template data.
+git init -q "$tmp/repo"
+mkdir -p "$tmp/lbin"
+cat >"$tmp/lbin/aws" <<'EOF'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "ec2 describe-security-groups") echo vpc-1 ;;
+  "ec2 describe-subnets") printf 'us-east-2a\tsubnet-1\n' ;;
+  "ec2 create-launch-template")
+    prev=
+    for a in "$@"; do [ "$prev" = --launch-template-data ] && printf '%s' "$a" >"$CASE/lt.json"; prev=$a; done
+    echo lt-1 ;;
+  "ec2 create-fleet") echo '{"Instances":[{"InstanceIds":["i-1"],"InstanceType":"m6a.32xlarge"}]}' ;;
+  "ec2 describe-instances") echo 10.0.0.1 ;;
+  "ssm describe-instance-information") echo Online ;;
+esac
+EOF
+chmod +x "$tmp/lbin/aws"
+
+# launch_template <case> [VAR=value...]: the launch template data aws_request_instance creates.
+function launch_template {
+  local case=$1
+  shift
+  mkdir -p "$tmp/$case/state"
+  (cd "$tmp/repo" && env -i PATH="$tmp/lbin:$script_dir:$script_dir/internal:$PATH" HOME="$tmp" CASE="$tmp/$case" CI=1 CI_REDIS_AVAILABLE=0 "$@" \
+    "$script_dir/aws_request_instance" test 2 amd64 "$tmp/$case/state" >/dev/null 2>&1) || true
+  cat "$tmp/$case/lt.json" 2>/dev/null
+}
+
+lt=$(launch_template l1)
+if jq -e '.MetadataOptions.InstanceMetadataTags == "enabled" and .InstanceInitiatedShutdownBehavior == "terminate"' <<<"$lt" >/dev/null 2>&1 &&
+  [ "$(jq -r .UserData <<<"$lt" | base64 -d)" = "$(lease_user_data)" ]; then
+  pass "a build instance gets the watchdog, its tags in metadata, and terminates when it shuts down"
+else
+  fail "launch template: $(jq -c '{UserData: (.UserData != null), MetadataOptions, InstanceInitiatedShutdownBehavior}' <<<"$lt" 2>&1)"
+fi
+
+lt=$(launch_template l2 AWS_SHUTDOWN_TERMINATES=0)
+if jq -e '.UserData != null and .InstanceInitiatedShutdownBehavior == null' <<<"$lt" >/dev/null 2>&1; then
+  pass "AWS_SHUTDOWN_TERMINATES=0 keeps the watchdog, and shutdown as stop"
+else
+  fail "launch template with AWS_SHUTDOWN_TERMINATES=0: $(jq -c '{UserData: (.UserData != null), InstanceInitiatedShutdownBehavior}' <<<"$lt" 2>&1)"
+fi
+
+lt=$(launch_template l3 NO_TERMINATE=1)
+if jq -e '.UserData == null and .InstanceInitiatedShutdownBehavior == null' <<<"$lt" >/dev/null 2>&1; then
+  pass "NO_TERMINATE=1 gets no watchdog"
+else
+  fail "launch template with NO_TERMINATE=1: $(jq -c '{UserData: (.UserData != null), InstanceInitiatedShutdownBehavior}' <<<"$lt" 2>&1)"
+fi
+
+if lease_user_data | sh -n; then
+  pass "the user data is a valid shell script"
+else
+  fail "the user data is not a valid shell script"
+fi
+
+echo
+echo "$passed passed, $failed failed."
+[ "$failed" -eq 0 ]

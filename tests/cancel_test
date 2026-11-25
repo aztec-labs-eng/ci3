@@ -46,12 +46,7 @@ case "$1 $2" in
     log "launched i-$n"
     echo "{\"Instances\":[{\"InstanceIds\":[\"i-$n\"],\"InstanceType\":\"m6a.32xlarge\"}]}" ;;
   "ec2 describe-instances")
-    if [[ "$args" == *tag:ParentInstance* ]]; then
-      parent=$(grep -o 'tag:ParentInstance,Values=[^ ]*' <<<"$args" | cut -d= -f2)
-      cat "$state/children-of-$parent" 2>/dev/null || true
-    elif [[ "$args" == *instance-id* ]]; then
-      echo 10.0.0.1
-    fi ;;
+    if [[ "$args" == *instance-id* ]]; then echo 10.0.0.1; fi ;;
   "ec2 terminate-instances")
     sleep "${STUB_TERMINATE_DELAY:-0}"
     for id in ${args#*--instance-ids }; do [[ "$id" == i-* ]] && log "terminated $id"; done ;;
@@ -59,10 +54,8 @@ case "$1 $2" in
   "ssm describe-instance-information") echo Online ;;
   "ssm send-command")
     iid=$(grep -o -- '--instance-ids [^ ]*' <<<"$args" | cut -d' ' -f2)
-    params=; prev=
-    for a in "$@"; do [ "$prev" = --parameters ] && params=$a; prev=$a; done
-    script=$(jq -r '.commands[0]' <<<"$params" | grep -o 'echo "[A-Za-z0-9+/=]*"' | cut -d'"' -f2 | base64 -d)
-    if [[ "$script" == *"shutdown -h"* ]]; then echo timer-$iid; else log "command on $iid"; echo cmd-$iid; fi ;;
+    log "command on $iid"
+    echo cmd-$iid ;;
   "ssm get-command-invocation")
     log "polling $(grep -o -- '--command-id [^ ]*' <<<"$args" | cut -d' ' -f2)"
     echo "{\"Status\":\"$(cat "$state/ssm_status" 2>/dev/null || echo InProgress)\",\"ResponseCode\":0}" ;;
@@ -122,7 +115,6 @@ function run_case {
   shift 6
   mkdir -p "$state"
   : >"$state/calls"
-  echo i-child >"$state/children-of-i-1"
   local ended
   ended=$(env -i PATH="$tmp/bin:$PATH" HOME="$tmp" REPO="$tmp/repo" STUB_STATE="$state" CI=1 CI_REDIS_AVAILABLE=0 \
     GITHUB_REPOSITORY=test/repo REF_NAME=test AWS_DEFAULT_REGION=us-east-2 \
@@ -138,20 +130,20 @@ function run_case {
   fi
 }
 
-check "CI cancel while the build runs terminates the instance and the ones it launched" \
-  ci "polling cmd-i-1" "i-1 i-child" 1 "$script_dir/bootstrap_ec2" "./bootstrap.sh ci-fast"
+check "CI cancel while the build runs terminates the instance" \
+  ci "polling cmd-i-1" "i-1" 1 "$script_dir/bootstrap_ec2" "./bootstrap.sh ci-fast"
 
 STUB_FLEET_DELAY=3 check "CI cancel while the instance is being requested terminates it" \
-  ci "requesting fleet" "i-1 i-child" 0 "$script_dir/bootstrap_ec2" "./bootstrap.sh ci-fast"
+  ci "requesting fleet" "i-1" 0 "$script_dir/bootstrap_ec2" "./bootstrap.sh ci-fast"
 
 STUB_TERMINATE_DELAY=1 check "Ctrl-C, twice, while the build runs terminates the instance" \
-  terminal "polling cmd-i-1" "i-1 i-child" 1 "$script_dir/bootstrap_ec2" "./bootstrap.sh ci-fast"
+  terminal "polling cmd-i-1" "i-1" 1 "$script_dir/bootstrap_ec2" "./bootstrap.sh ci-fast"
 
 check "CI cancel of a multi-job run terminates every job's instance" \
-  ci "polling cmd-i-1|polling cmd-i-2" "i-1 i-2 i-child" 2 "$script_dir/bootstrap_ec2_multi" "x-a amd64 ci-fast" "x-b amd64 ci-fast"
+  ci "polling cmd-i-1|polling cmd-i-2" "i-1 i-2" 2 "$script_dir/bootstrap_ec2_multi" "x-a amd64 ci-fast" "x-b amd64 ci-fast"
 
 STUB_TERMINATE_DELAY=1 check "Ctrl-C, twice, of a multi-job run terminates every job's instance" \
-  terminal "polling cmd-i-1|polling cmd-i-2" "i-1 i-2 i-child" 2 "$script_dir/bootstrap_ec2_multi" "x-a amd64 ci-fast" "x-b amd64 ci-fast"
+  terminal "polling cmd-i-1|polling cmd-i-2" "i-1 i-2" 2 "$script_dir/bootstrap_ec2_multi" "x-a amd64 ci-fast" "x-b amd64 ci-fast"
 
 wait
 for i in $(seq 1 $case_n); do
@@ -165,7 +157,7 @@ done
 # as a build that runs these tests.
 function leftover {
   local pid
-  for pid in $(pgrep -f "$script_dir/(bootstrap_ec2|internal/ssm_send_command|denoise|aws_request_instance)"); do
+  for pid in $(pgrep -f "$script_dir/(bootstrap_ec2|internal/ssm_send_command|internal/aws_instance_lease|denoise|aws_request_instance)"); do
     tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -q "^STUB_STATE=$tmp/" && ps -o pid=,args= -p "$pid" | cut -c1-120
   done
   return 0
