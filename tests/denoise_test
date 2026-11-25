@@ -141,6 +141,20 @@ else
   fail "denoise exits promptly" "code=$code elapsed=${elapsed}s"
 fi
 
+# --- Test 6: nothing on stderr ---
+# A finished command's pid has been reaped, so cleanup on exit must not signal or wait on it again:
+# the pid may belong to another process by then.
+echo "--- Test: denoise writes nothing to stderr ---"
+
+for cmd in 'echo ok' 'echo failing; exit 3'; do
+  err=$(env "${DENOISE_ENV[@]}" "$ROOT/ci3/denoise" "$cmd" 2>&1 >/dev/null || true)
+  if [ -z "$err" ]; then
+    pass "nothing on stderr for: $cmd"
+  else
+    fail "nothing on stderr for: $cmd" "$err"
+  fi
+done
+
 echo
 if [[ $TESTS_FAILED -eq 0 ]]; then
   echo "${GREEN}All $TESTS_PASSED tests passed.${NC}"
