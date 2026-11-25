@@ -17,9 +17,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Signal dispositions (temporary diagnostic)
         run: |
-          echo "step shell:   $(grep -E 'SigIgn|SigBlk' /proc/$$/status | tr '\n' ' ')"
-          echo "step parent:  $(grep -E 'Name|SigIgn' /proc/$PPID/status | tr '\n' ' ')"
-          echo "child:        $(grep -E 'SigIgn' /proc/self/status)"
+          grep -E 'Name|SigBlk|SigIgn' /proc/$PPID/status
+          grep -E 'SigBlk|SigIgn' /proc/self/status
+          bash -c 'grep -E "SigBlk|SigIgn" /proc/self/status'
+          bash -c 'trap "echo trapped INT" INT; kill -INT $$; sleep 1; echo after kill'
       - name: Install dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y -qq parallel lz4 pigz zstd >/dev/null
       - name: Run tests
