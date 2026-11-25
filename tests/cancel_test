@@ -153,10 +153,20 @@ for i in $(seq 1 $case_n); do
   if [[ "$line" == *✓* ]]; then ((++passed)); else ((++failed)); fi
 done
 
-# Every run's processes are gone, once their cleanup has had a moment to finish.
+# Every run's processes are gone, once their cleanup has had a moment to finish. A run's processes are
+# told apart by the STUB_STATE they inherit, as the same scripts may be running for other reasons, such
+# as a build that runs these tests.
+function leftover {
+  local pid
+  for pid in $(pgrep -f "$script_dir/(bootstrap_ec2|internal/ssm_send_command|denoise|aws_request_instance)"); do
+    tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -q "^STUB_STATE=$tmp/" && ps -o pid=,args= -p "$pid" | cut -c1-120
+  done
+  return 0
+}
 sleep 1
-if pgrep -f "$script_dir/(bootstrap_ec2|internal/ssm_send_command|denoise|aws_request_instance)" >/dev/null; then
-  fail "processes of a cancelled run are left: $(pgrep -af "$script_dir/(bootstrap_ec2|internal/ssm_send_command|denoise|aws_request_instance)" | cut -c1-120 | xargs)"
+left=$(leftover)
+if [ -n "$left" ]; then
+  fail "processes of a cancelled run are left: $(tr '\n' ' ' <<<"$left")"
 else
   pass "no process of any run is left"
 fi
