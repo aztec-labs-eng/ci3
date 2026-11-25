@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # deploy_npm's pack mode (NPM_PACK_DIR): it packs the release tarball without touching the registry,
-# with the version stamped, first-party dependencies pinned to it, @noir-lang dependencies renamed to
-# @aztec-foundation/noir-*, and repository naming the repository and the package's directory in it,
-# which npm provenance requires.
+# with the version stamped, first-party dependencies pinned to it, and repository naming the repository
+# and the package's directory in it, which npm provenance requires.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -32,7 +31,6 @@ cat >$repo/packages/foo/package.json <<'EOF'
   "files": ["index.js"],
   "dependencies": {
     "@aztec-foundation/bar": "workspace:^",
-    "@noir-lang/acvm_js": "portal:../../noir/acvm_js",
     "left-pad": "1.3.0"
   }
 }
@@ -53,8 +51,6 @@ if pack env -u GITHUB_REPOSITORY; then
   m=$(manifest)
   expect "version stamped" "$(jq -r .version <<<"$m")" 1.2.3-nightly.20261125
   expect "first-party dependency pinned" "$(jq -r '.dependencies["@aztec-foundation/bar"]' <<<"$m")" 1.2.3-nightly.20261125
-  expect "noir dependency renamed" "$(jq -r '.dependencies["@aztec-foundation/noir-acvm_js"]' <<<"$m")" 1.2.3-nightly.20261125
-  expect "@noir-lang name dropped" "$(jq -r '.dependencies["@noir-lang/acvm_js"] // "absent"' <<<"$m")" absent
   expect "third-party dependency untouched" "$(jq -r '.dependencies["left-pad"]' <<<"$m")" 1.3.0
   expect "repository from origin" "$(jq -r .repository.url <<<"$m")" git+https://github.com/ExampleOrg/example-repo.git
   expect "package directory" "$(jq -r .repository.directory <<<"$m")" packages/foo
