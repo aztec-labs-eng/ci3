@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+# Shows what `make <goal>` would build and why, before anything is built.
+#
+#   step_plan [goal]       (from the directory holding the Makefile; default: the Makefile's default goal)
+#
+# It runs make in keys-only mode (see step): every step works out its key and asks the cache whether it
+# is there, and nothing is built, downloaded or uploaded. Then it prints the goal's dependency tree:
+#   cached     the key is in the cache: it will be restored, not built
+#   BUILD      it is not, with why, against the record of the target's last build (internal/source_step):
+#              which of its inputs changed since that commit, or which prerequisite, setting or toolchain
+#              did; or that the same key was built before but is no longer cached
+#   always     outputs `never`: it always runs, and caches its own items if anything
+#   uncached   caching is off for it, as with uncommitted changes to its inputs
+# Order-only prerequisites are marked "(runs first)". Targets that are not steps yet are left out, unless a
+# step depends on them; STEP_PLAN_ALL=1 shows every target.
+NO_CD=1 source $(dirname "${BASH_SOURCE[0]}")/source
+source $ci3/internal/source_step
+
+goal=${1:-}
+keys=$(mktemp -d)
+trap 'rm -rf "$keys"' EXIT
+
+# Resolve once here, so the record lookups below (in subshells) don't each ask the remote.
+ci_default_branch >/dev/null
+
+if ! CI3_KEYS_ONLY=1 CI3_PLAN=1 CI3_KEYS_DIR=$keys make -s -j"$(get_num_cpus)" $goal >"$keys/.make.log" 2>&1; then
+  cat "$keys/.make.log" >&2
+  echo_stderr "step_plan: computing the keys failed."
+  exit 1
+fi
+
+# The graph, from make's database: one line per target, "<target>\t<prerequisites>\t<order-only>".
+# make -q exits 1 when the goal is out of date, as phony targets always are: only its output matters.
+make_db=$(CI3_KEYS_DIR=$keys make -rpq $goal 2>/dev/null || true)
+awk '
+  /^# Files/ { files = 1; next }
+  /^# files hash-table stats/ { files = 0 }
+  !files { next }
+  /^# Not a target:/ { skip = 1; next }
+  /^[^#\t ][^:]*:/ {
+    if (skip) { skip = 0; next }
+    t = substr($0, 1, index($0, ":") - 1); rest = substr($0, index($0, ":") + 1)
+    if (rest ~ /=/) next                     # a target-specific variable, not a rule
+    n = index(rest, "|"); normal = n ? substr(rest, 1, n - 1) : rest; after = n ? substr(rest, n + 1) : ""
+    gsub(/^ +| +$/, "", normal); gsub(/^ +| +$/, "", after)
+    print t "\t" normal "\t" after
+  }' <<<"$make_db" >"$keys/.graph"
+[ -n "$goal" ] || goal=$(awk -F' := ' '/^\.DEFAULT_GOAL :=/ { print $2; exit }' <<<"$make_db")
+
+declare -A normal_of after_of
+while IFS=$'\t' read -r t normal after; do
+  normal_of[$t]=$normal
+  after_of[$t]=$after
+done <"$keys/.graph"
+
+function is_step { [ -f "$keys/$1.status" ]; }
+
+# Whether a target is a step or has one below it: the rest of the graph is not the plan's business.
+declare -A relevant_memo
+function relevant {
+  local t=$1 d
+  [ "${STEP_PLAN_ALL:-0}" -eq 1 ] && return 0
+  if [ -z "${relevant_memo[$t]:-}" ]; then
+    relevant_memo[$t]=no
+    if is_step "$t"; then
+      relevant_memo[$t]=yes
+    else
+      for d in ${normal_of[$t]:-} ${after_of[$t]:-}; do
+        if relevant "$d"; then relevant_memo[$t]=yes; break; fi
+      done
+    fi
+  fi
+  [ "${relevant_memo[$t]}" = yes ]
+}
+
+# Names up to three of a target's inputs that changed between a commit and HEAD.
+function changed_inputs {
+  local t=$1 commit=$2 files n
+  # Build containers fetch one commit, so the recorded one may need fetching: its tree is enough to diff.
+  git cat-file -e "$commit^{commit}" 2>/dev/null || timeout 60 git fetch -q --depth 1 origin "$commit" 2>/dev/null ||
+    { echo "inputs changed"; return; }
+  files=$(git diff --name-only "$commit" HEAD | cache_content_hash --filter $(<"$keys/$t.inputs") || true)
+  n=$(grep -c . <<<"$files" || true)
+  if [ "$n" -eq 0 ]; then
+    echo "inputs changed"
+  elif [ "$n" -le 3 ]; then
+    echo "changed: $(paste -sd' ' <<<"$files")"
+  else
+    echo "changed: $(head -n 3 <<<"$files" | paste -sd' ' -) (+$((n - 3)) more)"
+  fi
+}
+
+# Why a step that is not cached must be built.
+function why {
+  local t=$1 record commit key line name reasons=()
+  if ! record=$(step_record_read "$t"); then
+    echo "no record of an earlier build"
+    return
+  fi
+  commit=$(sed -n 1p <<<"$record")
+  key=$(sed -n 2p <<<"$record")
+  if [ "$key" = "$(<"$keys/$t")" ]; then
+    echo "built at ${commit:0:10} but no longer in the cache"
+    return
+  fi
+  while IFS= read -r line; do
+    grep -qxF -- "$line" <(tail -n +3 <<<"$record") && continue
+    name=${line%%=*}
+    case "$name" in
+      target) ;;
+      inputs) reasons+=("$(changed_inputs "$t" "$commit")") ;;
+      toolchain) reasons+=("toolchain changed") ;;
+      salt) reasons+=("KEY_SALT changed") ;;
+      env:*) reasons+=("${name#env:} changed") ;;
+      *) reasons+=("$name changed") ;;
+    esac
+  done <"$keys/$t.parts"
+  [ ${#reasons[@]} -gt 0 ] || reasons=("its ingredients changed")
+  local out
+  out=$(printf '%s; ' "${reasons[@]}")
+  echo "${out%; } (since ${commit:0:10})"
+}
+
+# Why a step's key is disabled-cache: its own inputs have uncommitted changes, or a prerequisite's do.
+function why_uncached {
+  local deps
+  if grep -qx 'inputs=disabled-cache' "$keys/$1.parts"; then
+    echo "uncommitted changes to its inputs"
+  elif deps=$(grep -E '^[^:=]+=disabled-cache$' "$keys/$1.parts" | grep -v '^inputs=' | cut -d= -f1 | paste -sd' ' -) &&
+    [ -n "$deps" ]; then
+    echo "$deps uncached"
+  else
+    echo "caching is disabled"
+  fi
+}
+
+declare -A shown
+counts_cached=0 counts_build=0 counts_always=0 counts_uncached=0
+# Sets lbl to what the plan says about a target, and counts it.
+function label {
+  local t=$1
+  lbl=
+  if ! is_step "$t"; then
+    [ -f "$keys/$t.legacy" ] && lbl="not a step"
+    return 0
+  fi
+  case $(<"$keys/$t.status") in
+    hit) ((++counts_cached)); lbl="${green}cached${reset}" ;;
+    miss) ((++counts_build)); lbl="${yellow}BUILD${reset}  $(why "$t")" ;;
+    never) ((++counts_always)); lbl="always runs" ;;
+    disabled) ((++counts_uncached)); lbl="${yellow}uncached${reset}  $(why_uncached "$t")" ;;
+    group) ;;
+  esac
+}
+
+function show {
+  local t=$1 prefix=$2 branch=$3 child_prefix=$4 note=${5:-}
+  local key=
+  if is_step "$t"; then
+    key=$(<"$keys/$t")
+    [ "$key" = disabled-cache ] && key=- || key=${key:0:12}
+  fi
+  if [ -n "${shown[$t]:-}" ]; then
+    printf '%s%s%s%s (see above)\n' "$prefix" "$branch" "$t" "$note"
+    return
+  fi
+  shown[$t]=1
+  label "$t"
+  printf '%s%s%s%s  %s  %b\n' "$prefix" "$branch" "$t" "$note" "$key" "$lbl"
+  local children=() d
+  # A step's legacy prerequisites are part of its key, so they are shown too.
+  for d in ${normal_of[$t]:-}; do
+    if relevant "$d" || { is_step "$t" && [ -f "$keys/$d.legacy" ]; }; then children+=("$d"); fi
+  done
+  for d in ${after_of[$t]:-}; do relevant "$d" && children+=("$d|"); done
+  local i n=${#children[@]} c
+  for ((i = 0; i < n; i++)); do
+    c=${children[$i]}
+    local c_note=
+    [[ "$c" == *"|" ]] && { c=${c%|}; c_note=" (runs first)"; }
+    if ((i == n - 1)); then
+      show "$c" "$child_prefix" "└─ " "$child_prefix   " "$c_note"
+    else
+      show "$c" "$child_prefix" "├─ " "$child_prefix│  " "$c_note"
+    fi
+  done
+}
+
+echo "Build plan for '$goal':"
+if relevant "$goal"; then
+  show "$goal" "" "" ""
+else
+  echo "  (no steps)"
+fi
+echo "Steps: $counts_build to build, $counts_cached cached, $counts_always always run, $counts_uncached uncached."

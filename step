@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# Runs one step of a build: a make target whose cache key ci3 derives from the make dependency graph.
+#
+#   step <target> <bootstrap command> <outputs> [prerequisite...]
+#
+# The `step` macro in step.mk calls it from the project's directory, with the target's normal prerequisites
+# ($^) as arguments, and these in the environment:
+#   INPUTS      rebuild patterns (pattern files, directories or ^regexes) relative to the repository root
+#   AFTER       the order-only prerequisites ($|): they run first, but are not part of the key
+#   KEY_ENV     names of environment variables whose values change the outputs
+#   KEY_SALT    anything else to fold into the key, such as a version bumped by hand
+#   CI3_KEYS_DIR      one directory per make run (step.mk makes it)
+#   CI3_TOOLCHAIN_ID  set by the repository: what builds the outputs, such as a build image's digest
+#
+# The key hashes the target's name, its inputs, the KEY_ENV values, KEY_SALT, the toolchain and the key of
+# each prerequisite. The make graph is the only statement of what depends on what: nothing here or in the
+# bootstrap scripts repeats it. A step's own key is exported as STEP_KEY, and each prerequisite's as
+# CI3_KEY_<NAME> (non-alphanumerics as _), for a command that caches finer than its target, per item.
+# A prerequisite that is not a step yet (a recipe run through step_legacy) is keyed by its project's
+# `./bootstrap.sh hash`.
+#
+# <outputs>, relative to the project directory, are what a cache hit restores:
+#   <paths...>  cached together as <target>-<key>.tar.gz
+#   -           nothing to restore, as for a check: a pass is cached, and a cached pass skips the command
+#   never       always runs, as for a command that caches per item itself
+# A <bootstrap command> of - runs nothing: the target only groups its prerequisites (see step_group).
+#
+# The command runs as `./bootstrap.sh <bootstrap command>` under denoise. After an upload, the key and its
+# ingredients are recorded, so step_plan can explain the next rebuild (internal/source_step).
+#
+# CI3_KEYS_ONLY=1 records the key and stops: nothing is built, downloaded or uploaded. With CI3_PLAN=1 as
+# well, it also asks the cache whether the key is there. step_plan runs make this way.
+NO_CD=1 source $(dirname "${BASH_SOURCE[0]}")/source
+source $ci3/internal/source_step
+
+if [ "$#" -lt 3 ]; then
+  echo_stderr "Usage: step <target> <bootstrap command> <outputs> [prerequisite...]"
+  exit 1
+fi
+target=$1 command=$2 outputs=$3
+shift 3
+keys=${CI3_KEYS_DIR:?step: CI3_KEYS_DIR is not set. Include ci3/step.mk in the Makefile.}
+
+# Prints a prerequisite's key. A step recorded its own. One still run by step_legacy is keyed by its
+# project's ./bootstrap.sh hash, computed once per make run by whichever step needs it first.
+function prerequisite_key {
+  local dep=$1 dir legacy_key
+  if [ ! -f "$keys/$dep" ] && [ -f "$keys/$dep.legacy" ]; then
+    dir=$(<"$keys/$dep.legacy")
+    if ! legacy_key=$(cd "$dir" && ./bootstrap.sh hash 2>/dev/null | tail -n 1) || [ -z "$legacy_key" ]; then
+      echo_stderr "step: $target: prerequisite $dep is not a step, and '$dir/bootstrap.sh hash' failed: not caching."
+      legacy_key=disabled-cache
+    fi
+    echo "$legacy_key" >"$keys/$dep.$$" && mv "$keys/$dep.$$" "$keys/$dep"
+  fi
+  if [ ! -f "$keys/$dep" ]; then
+    echo_stderr "step: $target: prerequisite $dep has no key. Make it a step, run its recipe through step_legacy,"
+    echo_stderr "  or, for a target that only groups others, give it the recipe \$(call step_group,\$@)."
+    return 1
+  fi
+  cat "$keys/$dep"
+}
+
+# --- The key -----------------------------------------------------------------------------------------------
+# One ingredient per line, "<name>=<value>". step_plan compares them with the last build's.
+parts=("target=$target")
+[ -n "${CI3_TOOLCHAIN_ID:-}" ] && parts+=("toolchain=$CI3_TOOLCHAIN_ID")
+# Patterns are relative to the repository root, wherever the project is.
+[ -n "${INPUTS:-}" ] && parts+=("inputs=$(cd "$root" && cache_content_hash $INPUTS)")
+for name in ${KEY_ENV:-}; do
+  parts+=("env:$name=${!name:-}")
+done
+[ -n "${KEY_SALT:-}" ] && parts+=("salt=$KEY_SALT")
+for dep in "$@"; do
+  dep_key=$(prerequisite_key "$dep")
+  parts+=("$dep=$dep_key")
+  dep_var=${dep//[^A-Za-z0-9]/_}
+  export "CI3_KEY_${dep_var^^}=$dep_key"
+done
+# hash_str gives disabled-cache when any ingredient is, as with uncommitted changes to the inputs.
+key=$(hash_str "${parts[*]}")
+
+# --- Record it for the targets after this one, and for step_plan -------------------------------------------
+printf '%s\n' "${parts[@]}" >"$keys/$target.parts"
+printf '%s\n' "$@" >"$keys/$target.deps"
+printf '%s\n' ${AFTER:-} >"$keys/$target.after"
+echo "${INPUTS:-}" >"$keys/$target.inputs"
+echo "$key" >"$keys/$target"
+
+artifact=$target-$key.tar.gz
+
+if [ "${CI3_KEYS_ONLY:-0}" -eq 1 ]; then
+  if [ "${CI3_PLAN:-0}" -eq 1 ]; then
+    if [ "$command" = - ]; then
+      status=group
+    elif [ "$outputs" = never ]; then
+      status=never
+    elif [ "$key" = disabled-cache ]; then
+      status=disabled
+    elif cache_exists "$artifact"; then
+      status=hit
+    else
+      status=miss
+    fi
+    echo "$status" >"$keys/$target.status"
+  fi
+  exit 0
+fi
+
+[ "$command" = - ] && exit 0
+export STEP_KEY=$key
+
+# --- Restore, or build and upload --------------------------------------------------------------------------
+# A check's pass flag goes through a directory of its own, so nothing is left in the project.
+flag_dir=
+if [ "$outputs" = - ]; then
+  flag_dir=$(mktemp -d)
+  trap 'rm -rf "$flag_dir"' EXIT
+fi
+
+if [ "$outputs" != never ] && cache_download "$artifact" ${flag_dir:+"$flag_dir"}; then
+  echo "$target: restored from the cache ($key)."
+  exit 0
+fi
+
+denoise "./bootstrap.sh $command"
+
+case "$outputs" in
+  never) exit 0 ;;
+  -) touch "$flag_dir/passed"; (cd "$flag_dir" && cache_upload "$artifact" passed) ;;
+  *) cache_upload "$artifact" $outputs ;;
+esac
+
+# cache_upload succeeds whether or not it uploaded (outside CI, an existing key, no credentials), so record
+# the build only once the artifact is there to be found.
+if [ "$key" != disabled-cache ] && cache_exists "$artifact"; then
+  { git -C "$root" rev-parse HEAD; echo "$key"; printf '%s\n' "${parts[@]}"; } | step_record_write "$target" || true
+fi
