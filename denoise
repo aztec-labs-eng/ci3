@@ -84,25 +84,8 @@ function publish_log_final {
   format_log_output | log_publish $key $CI_REDIS_EXPIRE final
 }
 
-# Stopped with SIGTERM. bash runs the trap only once the command in progress has finished, so an
-# upload in flight completes before the loop exits, and a stopper that waits for the loop knows
-# no older copy can land after its own. The sleep is waited on in the background so a signal
-# interrupts it at once.
-function live_publish_log {
-  local sleep_pid=
-  trap 'kill $sleep_pid &>/dev/null; exit 0' TERM
-  while [ -f $outfile ]; do
-    if [ $(( $(date +%s) - $(stat -c %Y "$outfile") )) -le 5 ]; then
-      publish_log
-    fi
-    sleep 5 &
-    sleep_pid=$!
-    wait $sleep_pid
-  done
-}
-
 if log_store_available; then
-  live_publish_log &
+  live_publish_file $outfile publish_log &
   publish_pid=$!
   log_info="(${yellow}${url}${reset})"
 fi
