@@ -117,8 +117,8 @@ check "b's command sees its own key and each prerequisite's" \
 check "outputs are cached as <target>-<key>.tar.gz" 'ls "$CACHE_LOCAL_DIR" | grep -qE "^b-[0-9a-f]{16}\.tar\.gz$"'
 check "nothing changed: steps are restored, the check is skipped, only the legacy recipe runs" '[ "$(build)" = "l build" ]'
 check "a restored step has its outputs" 'grep -q "A V1" b/ci3-out/b/b.txt'
-check "a hit is one line" '[ "$(grep -c "\[a\]" "$tmp/make.log")" -eq 1 ] && grep -q "a: restored from the cache" "$tmp/make.log"'
-check "outputs already there for the key: nothing runs, nothing is restored" '[ "$(build warm)" = "l build" ] && grep -q "a: up to date" "$tmp/make.log"'
+check "a hit is one line" '[ "$(grep -c "\[a\]" "$tmp/make.log")" -eq 1 ] && grep -q "\[a\].*restored from the cache" "$tmp/make.log"'
+check "outputs already there for the key: nothing runs, nothing is restored" '[ "$(build warm)" = "l build" ] && grep -q "\[a\].*up to date" "$tmp/make.log"'
 check "outputs leave the work tree clean" '[ -z "$(git status --porcelain)" ]'
 
 commit c "c v2"

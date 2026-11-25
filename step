@@ -133,7 +133,7 @@ fi
 
 # --- Up to date, restore, or build and upload --------------------------------------------------------------
 if up_to_date; then
-  echo "$target: up to date ($key)."
+  echo "up to date ($key)."
   exit 0
 fi
 
@@ -142,7 +142,7 @@ fi
 [ -z "$outputs" ] && rm -rf "$out_rel"
 start=$SECONDS
 if cache_download "$artifact" &>/dev/null; then
-  echo "$target: restored from the cache ($key) in $((SECONDS - start))s."
+  echo "restored from the cache ($key) in $((SECONDS - start))s."
   exit 0
 fi
 
