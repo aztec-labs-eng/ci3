@@ -70,5 +70,28 @@ function log_publish {
   fi
 }
 
+# Runs <publish command> every 5 seconds while <file> exists, whenever the file has changed since the
+# last time. A change is a new size or mtime, not a recent mtime: an upload can take longer than the
+# interval, and a write made during it must still be published.
+#
+# Stopped with SIGTERM. bash runs the trap only once the command in progress has finished, so an upload
+# in flight completes before the loop exits, and a stopper that waits for the loop knows no older copy
+# can land after its own. The sleep is waited on in the background so a signal interrupts it at once.
+# Usage: live_publish_file <file> <publish command> &
+function live_publish_file {
+  local file=$1 publish=$2 sleep_pid= published= current
+  trap 'kill $sleep_pid &>/dev/null; exit 0' TERM
+  while [ -f "$file" ]; do
+    current=$(stat -c '%s %Y' "$file" 2>/dev/null)
+    if [ -n "$current" ] && [ "$current" != "$published" ]; then
+      published=$current
+      $publish
+    fi
+    sleep 5 &
+    sleep_pid=$!
+    wait $sleep_pid
+  done
+}
+
 # Export functions
-export -f cache_s3_transfer cache_s3_transfer_to log_store_available log_publish
+export -f cache_s3_transfer cache_s3_transfer_to log_store_available log_publish live_publish_file

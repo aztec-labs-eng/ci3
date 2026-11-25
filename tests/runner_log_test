@@ -39,3 +39,32 @@ key=$(grep -o 'ci.aztec-labs.com/[0-9a-f-]*' <<<"$out" | head -1 | cut -d/ -f2 |
 log=$(s3_log "$key")
 grep -q "Status: 0" <<<"$log" || fail "denoise publishes its final log to S3: $out / $log"
 pass "denoise publishes its final log to S3"
+
+# A line written while a live upload is in flight, followed by silence, as a CI run's log is while its
+# jobs build: it must still be published while the log is open, not only at the end.
+# s3_log_has <key> <text>: whether the published log comes to contain the text within 15s.
+function s3_log_has {
+  local i
+  for i in $(seq 1 30); do
+    gunzip -c "$WORK/s3/s3:/aztec-ci-artifacts/logs/${1:0:4}/$1.log.gz" 2>/dev/null | grep -q "^$2" && return 0
+    sleep 0.5
+  done
+  return 1
+}
+
+key=1700000000000102
+{ echo first; sleep 20; } | "$CI3/cache_log" "CI run" $key &
+cache_log_pid=$!
+s3_log_has $key first || fail "cache_log publishes a line written during an upload while the log is still open"
+pass "cache_log publishes a line written during an upload while the log is still open"
+kill $cache_log_pid 2>/dev/null || true
+
+out=$(mktemp)
+"$CI3/denoise" "echo first; sleep 20" >"$out" &
+denoise_pid=$!
+sleep 1
+key=$(grep -o 'ci.aztec-labs.com/[0-9a-f-]*' "$out" | head -1 | cut -d/ -f2 || true)
+s3_log_has "$key" first || fail "denoise publishes a line written during an upload while the command still runs"
+pass "denoise publishes a line written during an upload while the command still runs"
+kill $denoise_pid 2>/dev/null || true
+wait 2>/dev/null || true

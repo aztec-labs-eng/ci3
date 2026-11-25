@@ -146,15 +146,7 @@ function live_publish_log {
   # Close inherited stdout/stderr so this background process can't hold the outer
   # pipeline's pipe fds open (which would prevent denoise/redact from seeing EOF).
   exec >&- 2>&-
-  while [ -f $tmp_file ]; do
-    local stat=$(stat -c %Y "$tmp_file" || echo 0)
-    if [ $(( $(date +%s) - "$stat" )) -le 5 ]; then
-      publish_log
-    fi
-    sleep 5 &
-    sleep_pid=$!
-    wait $sleep_pid
-  done
+  live_publish_file "$tmp_file" publish_log
 }
 
 # Create a new log key and ci link.
