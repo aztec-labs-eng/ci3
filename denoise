@@ -136,6 +136,7 @@ job_pid=$(jobs -p %%)
 # Wait for the job to finish and get its exit status.
 wait $job_pid
 status=$?
+job_pid=
 
 time="${SECONDS}s"
 if [ -n "${publish_pid:-}" ]; then
