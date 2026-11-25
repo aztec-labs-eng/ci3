@@ -1,5 +1,9 @@
 # Records of each step's last build, written by step when it uploads and read by step_plan to explain a
-# rebuild. A record is the commit, the key, and the key's ingredients one per line, as step computed them.
+# rebuild. A record is the commit, the key, the output hash, and the key's ingredients one per line, as step
+# computed them.
+#
+# Also the output hash of each uploaded key (step_out_*), so that a step restored from the cache, or planned
+# as one, gives the steps that use it their key without hashing what it restored.
 #
 # Records are kept per repository, branch and target: in redis for 30 days, or, when CI3_STEP_RECORD_DIR
 # is set, as files under it (tests, and local experiments without redis). Losing one only costs the
@@ -39,4 +43,42 @@ function step_record_read {
     fi
   done
   return 1
+}
+
+# Prints a hash of the outputs at the given paths (relative to the working directory): their contents, file
+# names, executable bits and symlinks. ci3's own stamps (.key, .outhash) are left out.
+function step_output_hash {
+  {
+    find "$@" -type l -printf 'L %p %l\n' 2>/dev/null
+    find "$@" -type f -perm -u+x -printf 'X %p\n' 2>/dev/null
+    find "$@" -type f ! -name .key ! -name .outhash -print0 2>/dev/null | xargs -0r sha256sum
+  } | LC_ALL=C sort | sha256sum | cut -c1-16
+}
+
+function step_out_name {
+  echo "ci3-step-out/$(github_repo)/$1-$2"
+}
+
+# Usage: step_out_write <target> <key> <output hash>
+function step_out_write {
+  local name
+  name=$(step_out_name "$1" "$2")
+  if [ -n "${CI3_STEP_RECORD_DIR:-}" ]; then
+    mkdir -p "$(dirname "$CI3_STEP_RECORD_DIR/$name")"
+    echo "$3" >"$CI3_STEP_RECORD_DIR/$name"
+  else
+    redis_cli SETEX "$name" $((60 * 60 * 24 * 30)) "$3" >/dev/null
+  fi
+}
+
+# Usage: step_out_read <target> <key>. Fails when it is not known.
+function step_out_read {
+  local name out
+  name=$(step_out_name "$1" "$2")
+  if [ -n "${CI3_STEP_RECORD_DIR:-}" ]; then
+    out=$(cat "$CI3_STEP_RECORD_DIR/$name" 2>/dev/null || true)
+  else
+    out=$(redis_cli GET "$name" 2>/dev/null || true)
+  fi
+  [ -n "$out" ] && echo "$out"
 }

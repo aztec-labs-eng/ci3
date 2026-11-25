@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Steps (step, step_legacy, step_plan, step.mk) on a toy repository with a local cache.
 #
-#   a  step: builds $STEP_OUT/a.txt from its source, after c (only order-only prerequisites)
+#   a  step: builds $STEP_OUT/a.txt from its source, after c (only order-only prerequisites). Its inputs
+#      include a/notes.txt, which the build does not use: changing it rebuilds a to the same outputs.
 #   c  step: a check (outputs -), which a and b run after (order-only), so not part of their keys
 #   l  not a step: a recipe run through step_legacy, keyed by its ./bootstrap.sh hash, writing l/out
 #   b  step: uses a's and l's outputs, so both are in its key
@@ -42,6 +43,7 @@ for p in a b c l; do
   echo "^$p/" >"$p/.rebuild_patterns"
   echo "$p v1" >"$p/src.txt"
 done
+echo "notes v1" >a/notes.txt
 cat >a/bootstrap.sh <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -127,6 +129,8 @@ commit l "l v2"
 check "a changed legacy prerequisite rebuilds b" '[ "$(build)" = "b build l build" ]'
 commit a "a v2"
 check "a changed step rebuilds itself and what uses it" '[ "$(build)" = "a build b build l build" ]'
+echo "notes v2" >a/notes.txt && git commit -qam "a: notes"
+check "early cutoff: a rebuilt to the same outputs leaves b cached" '[ "$(build)" = "a build l build" ]'
 
 echo "step: keys only"
 keys=$(mktemp -d)
@@ -138,22 +142,30 @@ rm -rf "$keys"
 
 echo "step_plan"
 plan=$("$ci3/step_plan" all 2>&1 | sed 's/\x1b\[[0-9;]*m//g' || true)
-check "everything built and in place: all up to date" 'grep -q "Steps: 0 to build, 0 cached, 3 up to date" <<<"$plan"'
+check "everything built and in place: all up to date" 'grep -q "Steps: 0 to build, 0 cached if .*, 0 cached, 3 up to date" <<<"$plan"'
 check "plan counts the targets it cannot plan" 'grep -q "Not planned: 1 targets" <<<"$plan"'
 rm -rf {a,b,c}/ci3-out
 plan=$("$ci3/step_plan" all 2>&1 | sed 's/\x1b\[[0-9;]*m//g' || true)
-check "outputs gone: all cached" 'grep -q "Steps: 0 to build, 3 cached" <<<"$plan"'
+check "outputs gone: all cached" 'grep -q "Steps: 0 to build, 0 cached if .*, 3 cached" <<<"$plan"'
 commit a "a v3"
 : >"$RUNS"
 plan=$("$ci3/step_plan" all 2>&1 | sed 's/\x1b\[[0-9;]*m//g' || true)
 echo "$plan" | sed 's/^/    /'
 check "plan names the input that changed" 'grep -qE "^.*a  [0-9a-f]+  BUILD  changed: a/src.txt" <<<"$plan"'
-check "plan says b builds because a changed" 'grep -qE "b  [0-9a-f]+  BUILD  a changed" <<<"$plan"'
+check "plan says b is cached if a builds to the same outputs" 'grep -qE "b  [0-9a-f]+  cached if a unchanged" <<<"$plan"'
 check "plan marks the check as running first, cached" 'grep -qE "c \(runs first\)  [0-9a-f]+  cached" <<<"$plan"'
 check "plan tells order-only from normal prerequisites when a step has only order-only ones" \
   '[ "$(grep -cE "c \(runs first\)" <<<"$plan")" -eq 2 ]'
 check "plan shows the legacy prerequisite as not a step" 'grep -qE "l  +not a step" <<<"$plan"'
 check "planning built nothing" '[ ! -s "$RUNS" ]'
+build >/dev/null
+echo "notes v3" >a/notes.txt && git commit -qam "a: notes v3"
+plan=$("$ci3/step_plan" all 2>&1 | sed 's/\x1b\[[0-9;]*m//g' || true)
+check "and the build bears it out when a's outputs do not change" '[ "$(build)" = "a build l build" ]'
+commit a "a v4"
+build >/dev/null
+commit a "a v5"
+check "and when a's outputs do change, b rebuilds" '[ "$(build)" = "a build b build l build" ]'
 rm -f "$CACHE_LOCAL_DIR"/a-*
 build >/dev/null
 rm -rf "$CACHE_LOCAL_DIR"/a-* a/ci3-out
@@ -163,12 +175,12 @@ check "plan tells an evicted key from a changed one" 'grep -q "but no longer in 
 echo "step: uncommitted changes"
 build >/dev/null
 echo "a dirty" >a/src.txt
-before=$(ls "$CACHE_LOCAL_DIR" | wc -l)
+a_before=$(ls "$CACHE_LOCAL_DIR" | grep -c "^a-")
 check "a dirty input builds its step and what uses it" '[ "$(build)" = "a build b build l build" ]'
-check "and uploads nothing" '[ "$(ls "$CACHE_LOCAL_DIR" | wc -l)" -eq "$before" ]'
+check "uploads nothing of the dirty step" '[ "$(ls "$CACHE_LOCAL_DIR" | grep -c "^a-")" -eq "$a_before" ]'
 plan=$("$ci3/step_plan" all 2>&1 | sed 's/\x1b\[[0-9;]*m//g' || true)
 check "plan says the step with changes is uncached" 'grep -qE "a  -  uncached  uncommitted changes to its inputs" <<<"$plan"'
-check "and why what uses it is" 'grep -qE "b  -  uncached  a uncached" <<<"$plan"'
+check "and what uses it is cached if a builds to the same outputs" 'grep -qE "b  [0-9a-f]+  cached if a unchanged" <<<"$plan"'
 git checkout -q a/src.txt
 
 echo
