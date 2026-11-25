@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# deploy_npm's pack mode (NPM_PACK_DIR): it packs the release tarball without touching the registry,
+# with the version stamped, first-party dependencies pinned to it, and repository naming the repository
+# and the package's directory in it, which npm provenance requires.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CI3="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+failures=0
+pass() { echo "✓ $1"; }
+fail() {
+  echo "✗ $1: $2"
+  failures=$((failures + 1))
+}
+expect() {
+  if [ "$2" == "$3" ]; then pass "$1"; else fail "$1" "expected '$3', got '$2'"; fi
+}
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+repo=$work/repo
+mkdir -p $repo/packages/foo
+git -C $repo init -q
+git -C $repo remote add origin https://github.com/ExampleOrg/example-repo.git
+cat >$repo/packages/foo/package.json <<'EOF'
+{
+  "name": "@aztec-foundation/foo",
+  "version": "0.0.0",
+  "files": ["index.js"],
+  "dependencies": {
+    "@aztec-foundation/bar": "workspace:^",
+    "left-pad": "1.3.0"
+  }
+}
+EOF
+echo 'module.exports = 1;' >$repo/packages/foo/index.js
+
+# A registry that cannot answer: pack mode must not need one.
+function pack {
+  (cd $repo/packages/foo &&
+    env -u root -u NPM_TOKEN -u NPM_PASSWORD NPM_CONFIG_REGISTRY=http://127.0.0.1:9 NPM_CONFIG_FETCH_RETRIES=0 NPM_CONFIG_FETCH_TIMEOUT=2000 \
+      NPM_PACK_DIR=$work/out "$@" $CI3/deploy_npm 1.2.3-nightly.20261125 >$work/log 2>&1)
+}
+function manifest {
+  tar -xOzf $work/out/aztec-foundation-foo-1.2.3-nightly.20261125.tgz package/package.json
+}
+
+if pack env -u GITHUB_REPOSITORY; then
+  m=$(manifest)
+  expect "version stamped" "$(jq -r .version <<<"$m")" 1.2.3-nightly.20261125
+  expect "first-party dependency pinned" "$(jq -r '.dependencies["@aztec-foundation/bar"]' <<<"$m")" 1.2.3-nightly.20261125
+  expect "third-party dependency untouched" "$(jq -r '.dependencies["left-pad"]' <<<"$m")" 1.3.0
+  expect "repository from origin" "$(jq -r .repository.url <<<"$m")" git+https://github.com/ExampleOrg/example-repo.git
+  expect "package directory" "$(jq -r .repository.directory <<<"$m")" packages/foo
+else
+  fail "pack mode" "deploy_npm failed: $(tail -5 $work/log)"
+fi
+
+rm -rf $work/out
+if pack env GITHUB_REPOSITORY=OtherOrg/other-repo; then
+  expect "repository from GITHUB_REPOSITORY" "$(manifest | jq -r .repository.url)" git+https://github.com/OtherOrg/other-repo.git
+else
+  fail "pack mode with GITHUB_REPOSITORY" "deploy_npm failed: $(tail -5 $work/log)"
+fi
+
+[ $failures -eq 0 ]

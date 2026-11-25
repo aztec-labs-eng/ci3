@@ -27,38 +27,52 @@ if [ "$(jq -r '.private // false' package.json)" == "true" ]; then
   exit 0
 fi
 
-echo_header "publishing $package_name"
-
-published_version=$(npm show . version --tag $npm_tag 2>/dev/null | grep -vE '^@' || true)
-
-# Check if there is already a published package equal to given version, assume this is a re-run of a deploy.
-if [ "$version" == "$published_version" ]; then
-  echo "Tagged $npm_tag version $version is equal to published $npm_tag version $published_version."
-  echo "Skipping publish."
-  exit 0
-fi
-
-# A version older than what its dist-tag already points at must not take it: publishing a patch to
-# an old release line, or re-running an old tag's workflow, would otherwise repoint 'latest' (or
-# 'prerelease', or a channel's own tag) backwards for everyone. Such a version is published without
-# a dist-tag anyone reads, which costs nothing: an exact version and a range like '@5' both resolve
-# against the published versions and consult no tag.
-take_tag=1
-if [ -n "$published_version" ] && [ "$(semver sort "$published_version" "$version" | tail -1)" != "$version" ]; then
-  take_tag=0
-  echo "Version $version is older than the published $npm_tag ($published_version);"
-  echo "publishing it without moving '$npm_tag'."
-fi
-
-# npm attaches a dist-tag to every publish — omitting --tag means 'latest' — so publishing untagged
-# means taking one that nothing reads. Its name is fixed, so each package carries one such tag,
-# pointing at its most recent superseded publish, and it must not parse as a semver range, which npm
-# rejects as a dist-tag.
-tmp_tag=tmp-publish
-if [ "$take_tag" -eq 1 ]; then
-  publish_tag=$npm_tag
+# Pack mode: with NPM_PACK_DIR set, the release build only produces the publishable tarball (the same
+# version stamping and dependency rewriting as a publish) and drops it into that directory, for a
+# job that publishes the collected tarballs with npm trusted publishing, so the build machine holds
+# no npm credential. Nothing is read from the registry: the publishing job decides what is new.
+pack_dir=${NPM_PACK_DIR:-}
+if [ -n "$pack_dir" ]; then
+  echo_header "packing $package_name"
+  # npm provenance accepts a package only when repository.url names the repository it was built
+  # from; release_prep_package_json stamps it, with the package's directory in that repository.
+  export NPM_PACKAGE_REPOSITORY="git+$(github_repo_url).git"
+  export NPM_PACKAGE_DIR
+  NPM_PACKAGE_DIR=$(python3 -c 'import os,sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' "$PWD" "$root")
 else
-  publish_tag=$tmp_tag
+  echo_header "publishing $package_name"
+
+  published_version=$(npm show . version --tag $npm_tag 2>/dev/null | grep -vE '^@' || true)
+
+  # Check if there is already a published package equal to given version, assume this is a re-run of a deploy.
+  if [ "$version" == "$published_version" ]; then
+    echo "Tagged $npm_tag version $version is equal to published $npm_tag version $published_version."
+    echo "Skipping publish."
+    exit 0
+  fi
+
+  # A version older than what its dist-tag already points at must not take it: publishing a patch to
+  # an old release line, or re-running an old tag's workflow, would otherwise repoint 'latest' (or
+  # 'prerelease', or a channel's own tag) backwards for everyone. Such a version is published without
+  # a dist-tag anyone reads, which costs nothing: an exact version and a range like '@5' both resolve
+  # against the published versions and consult no tag.
+  take_tag=1
+  if [ -n "$published_version" ] && [ "$(semver sort "$published_version" "$version" | tail -1)" != "$version" ]; then
+    take_tag=0
+    echo "Version $version is older than the published $npm_tag ($published_version);"
+    echo "publishing it without moving '$npm_tag'."
+  fi
+
+  # npm attaches a dist-tag to every publish — omitting --tag means 'latest' — so publishing untagged
+  # means taking one that nothing reads. Its name is fixed, so each package carries one such tag,
+  # pointing at its most recent superseded publish, and it must not parse as a semver range, which npm
+  # rejects as a dist-tag.
+  tmp_tag=tmp-publish
+  if [ "$take_tag" -eq 1 ]; then
+    publish_tag=$npm_tag
+  else
+    publish_tag=$tmp_tag
+  fi
 fi
 
 # npmjs holds an accepted upload as "staged" for several minutes before the version goes live, and
@@ -85,6 +99,14 @@ cd package
 
 # Replace workspace:^ with concrete versions.
 release_prep_package_json $version
+
+if [ -n "$pack_dir" ]; then
+  mkdir -p "$pack_dir"
+  # The pack above already ran the package's prepack scripts in its workspace; this extracted copy
+  # has none, so they must not run again (the same reason publish uses --ignore-scripts).
+  npm pack --ignore-scripts --pack-destination "$pack_dir" --quiet
+  exit 0
+fi
 
 # Publish from temp dir
 if [ "$dry_run" -eq 1 ]; then

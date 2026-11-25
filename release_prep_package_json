@@ -17,6 +17,14 @@ if [ "$check_only" -eq 0 ]; then
   jq --arg v $version '.version = $v' package.json >$tmp && mv $tmp package.json
 fi
 
+# deploy_npm's pack mode sets these for npm provenance, which accepts a package only when
+# repository.url names the repository it was built from.
+if [ "$check_only" -eq 0 ] && [ -n "${NPM_PACKAGE_REPOSITORY:-}" ]; then
+  jq --arg u "$NPM_PACKAGE_REPOSITORY" --arg d "${NPM_PACKAGE_DIR:-}" \
+    '.repository = ({type: "git", url: $u} + (if $d == "" or $d == "." then {} else {directory: $d} end))' \
+    package.json >$tmp && mv $tmp package.json
+fi
+
 # NPM_RELEASE_RESOLUTIONS (a JSON map: the enclosing workspace root's `resolutions` field)
 # selects scoped mode: only the @aztec-labs packages local to the workspace being released are
 # co-published right now and get $version; every other first-party dependency is an external pin
