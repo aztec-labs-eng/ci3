@@ -30,10 +30,6 @@ function cleanup {
     wait $job_pid
     job_pid=
   fi
-  if [ -n "${redact_pid:-}" ]; then
-    wait $redact_pid
-    redact_pid=
-  fi
   if [ -n "${tail_pid:-}" ]; then
     kill $tail_pid &>/dev/null
     wait $tail_pid
@@ -132,20 +128,14 @@ while IFS= read -r line; do
 done < "$dots_fifo" &
 dots_pid=$!
 
-# Execute the command in background. Its output reaches redact through a process substitution rather
-# than a pipeline, so that $! is the command's shell, which cleanup signals, not redact.
-exec {redact_fd}> >(redact > $outfile)
-redact_pid=$!
-PARENT_LOG_ID=$key bash -c "set -euo pipefail; $cmd" >&$redact_fd 2>&1 &
-job_pid=$!
-exec {redact_fd}>&-
+# Execute the command in background. job_pid is the pipeline's first process, the command's shell,
+# which cleanup signals; $! would be its last, redact. Waiting on it waits for the whole pipeline.
+PARENT_LOG_ID=$key bash -c "set -euo pipefail; $cmd" 2>&1 | redact > $outfile &
+job_pid=$(jobs -p %%)
 
-# Wait for the job to finish and get its exit status, then for redact to finish writing its output.
+# Wait for the job to finish and get its exit status.
 wait $job_pid
 status=$?
-job_pid=
-wait $redact_pid
-redact_pid=
 
 time="${SECONDS}s"
 if [ -n "${publish_pid:-}" ]; then
