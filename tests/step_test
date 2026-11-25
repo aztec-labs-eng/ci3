@@ -203,6 +203,30 @@ check "which comes from b's outputs" 'grep -qx "b=$(<"$keys/b.out")" "$keys/b-te
 check "keys-only mode lists no tests" '[ "$(wc -l <"$CI3_TEST_CMDS_FILE")" -eq 1 ]'
 rm -rf "$keys"
 
+echo "step: path lists"
+mkdir -p p
+echo '^p/' >p/.rebuild_patterns
+printf '%s\n' '#!/usr/bin/env bash' 'echo "p $1" >>"$RUNS"' 'mkdir -p out && echo built >out/p.txt' >p/bootstrap.sh
+chmod +x p/bootstrap.sh
+{
+  echo 'pl: private INPUTS := p/.rebuild_patterns'
+  echo 'pl:'
+  printf '\t$(call step,$@,p,build,out)\n'
+} >>Makefile
+git add -A && git commit -qm "p"
+check "a path-list step builds and caches its paths" '[ "$(build warm pl)" = "p build" ] && [ -f p/out/p.txt ]'
+check "then is up to date" '[ -z "$(build warm pl)" ] && grep -q "\[pl\].*up to date" "$tmp/make.log"'
+touch p/out/stale.txt && rm p/ci3-out/pl/.key
+check "a restore clears what was there" '[ -z "$(build warm pl)" ] && [ -f p/out/p.txt ] && [ ! -e p/out/stale.txt ]'
+check "and the outputs leave the work tree clean" '[ -z "$(git status --porcelain)" ]'
+rm -rf p/out
+check "missing outputs are not up to date" '[ -z "$(build warm pl)" ] && [ -f p/out/p.txt ]'
+# An artifact from before output hashes: restoring it computes the hash.
+a_tar=$(ls "$CACHE_LOCAL_DIR"/a-*.tar.gz | head -1)
+mkdir "$tmp/old" && tar -xzf "$a_tar" -C "$tmp/old" && rm "$tmp/old/ci3-out/a/.outhash"
+tar -czf "$a_tar" -C "$tmp/old" ci3-out
+check "an artifact without an output hash restores" 'git checkout -q "$(git log --format=%H -1 -- a/src.txt)" -- a 2>/dev/null; build >/dev/null && [ -s a/ci3-out/a/.outhash ]'
+
 echo
 echo "step_test: $passed passed, $failed failed"
 [ "$failed" -eq 0 ]

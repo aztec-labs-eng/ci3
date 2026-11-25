@@ -35,7 +35,8 @@
 #               key they are cached under: $STEP_KEY, rather than a hash of the bootstrap's own. They go
 #               through filter_test_cmds to the test engine's file, CI3_TEST_CMDS_FILE (/tmp/test_cmds).
 #   <paths...>  transitional, for tools that keep their outputs in working directories of their own: these
-#               paths, relative to the project, are cached and restored in place instead of $STEP_OUT
+#               paths, relative to the project, are cached and restored in place instead of $STEP_OUT. They
+#               are the step's: they are removed before a restore or build. Their stamps go in ci3-out/<target>.
 # A <bootstrap command> of - runs nothing: the target only groups its prerequisites (see step_group).
 #
 # The command runs as `./bootstrap.sh <bootstrap command>` under denoise. After an upload, the key and its
@@ -111,9 +112,20 @@ echo "$key" >"$keys/$target"
 
 artifact=$target-$key.tar.gz
 
-# Whether $STEP_OUT already holds this key's outputs.
+# Whether this key's outputs are already in place: the stamps in ci3-out/<target> (beside the outputs in
+# $STEP_OUT, or alone for a path list) name the key, and a path list's paths all exist.
 function up_to_date {
-  [ -z "$outputs" ] && [ "$key" != disabled-cache ] && [ "$(cat "$out_rel/.key" 2>/dev/null)" = "$key" ]
+  [ "$key" != disabled-cache ] && [ "$(cat "$out_rel/.key" 2>/dev/null)" = "$key" ] && [ -s "$out_rel/.outhash" ] ||
+    return 1
+  local path
+  for path in $outputs; do [ -e "$path" ] || return 1; done
+}
+
+# Stamps the outputs in place with their key and output hash.
+function stamp {
+  mkdir -p "$out_rel"
+  echo "$key" >"$out_rel/.key"
+  echo "$1" >"$out_rel/.outhash"
 }
 
 # Hands the steps after this one what it contributes to their keys.
@@ -143,7 +155,7 @@ if [ "${CI3_KEYS_ONLY:-0}" -eq 1 ]; then
     if [ "$key" = disabled-cache ]; then
       status=disabled
       guess=1
-    elif up_to_date && [ -s "$out_rel/.outhash" ]; then
+    elif up_to_date; then
       status=current
       publish "$(<"$out_rel/.outhash")"
     elif out=$(step_out_read "$target" "$key"); then
@@ -185,22 +197,27 @@ if [ "$command" = - ] || [ "$outputs" = never ]; then
 fi
 
 # --- Up to date, restore, or build and upload --------------------------------------------------------------
-if up_to_date && [ -s "$out_rel/.outhash" ]; then
+if up_to_date; then
   publish "$(<"$out_rel/.outhash")"
   echo "up to date ($key)."
   exit 0
 fi
 
+# The outputs are the step's: what was there goes before a restore or a build, so nothing stale survives
+# beside what is restored or built.
+rm -rf "$out_rel" $outputs
+
 # A hit is one line: cache_download's own account only matters when the download fails, and a miss is not
 # a failure.
-[ -z "$outputs" ] && rm -rf "$out_rel"
 start=$SECONDS
 if cache_download "$artifact" &>/dev/null; then
   if [ -z "$outputs" ]; then
-    out=$(<"$out_rel/.outhash")
+    # Older artifacts have no .outhash.
+    out=$(cat "$out_rel/.outhash" 2>/dev/null) || out=$(step_output_hash "$out_rel")
   else
     out=$(step_out_read "$target" "$key") || out=$(step_output_hash $outputs)
   fi
+  stamp "$out"
   publish "$out"
   echo "restored from the cache ($key) in $((SECONDS - start))s."
   exit 0
@@ -214,12 +231,12 @@ denoise "./bootstrap.sh $command"
 
 if [ -z "$outputs" ]; then
   out=$(step_output_hash "$out_rel")
-  echo "$key" >"$out_rel/.key"
-  echo "$out" >"$out_rel/.outhash"
+  stamp "$out"
   cache_upload "$artifact" "$out_rel"
 else
   out=$(step_output_hash $outputs)
   cache_upload "$artifact" $outputs
+  stamp "$out"
 fi
 publish "$out"
 echo "outputs: $out"
