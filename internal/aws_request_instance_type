@@ -43,12 +43,6 @@ function cleanup {
 trap 'cleanup' SIGINT SIGTERM
 trap 'delete_lt' EXIT
 
-# Sleeps in the background, so a signal is handled at once rather than after the sleep.
-function pause {
-  sleep "$1" &
-  wait $!
-}
-
 # Instances get no key pair and a security group with no inbound rules: they are reached only through SSM.
 if [ -n "${KEY_NAME:-}" ]; then
   echo_stderr "KEY_NAME is set, but build instances no longer take an SSH key pair; they are reached through SSM."
@@ -183,7 +177,7 @@ if [ "${NO_SPOT:-0}" -ne 1 ]; then
       echo "Spot fleet unfulfilled after ${spot_timeout}s; falling back to on-demand."
       break
     fi
-    pause "$spot_poll"
+    interruptible sleep "$spot_poll"
   done
 fi
 
@@ -213,7 +207,7 @@ if [ -z "$iid" ]; then
       break
     fi
     echo "On-demand capacity unavailable$(echo "$resp" | jq -r '.Errors[0].ErrorCode // "" | if . == "" then "" else " (" + . + ")" end' 2>/dev/null); retrying in ${ondemand_poll}s (elapsed ${SECONDS}s)..."
-    pause "$ondemand_poll"
+    interruptible sleep "$ondemand_poll"
   done
 fi
 
@@ -236,7 +230,7 @@ echo "$lifecycle" > "$state_dir/spot"
 
 ip=""
 while [ -z "${ip:-}" ]; do
-  pause 1
+  interruptible sleep 1
   ip=$(aws ec2 describe-instances \
     --filter "Name=instance-id,Values=$iid" \
     --query "Reservations[*].Instances[*].PublicIpAddress" \
@@ -255,7 +249,7 @@ while (( SECONDS < 300 )); do
     --output text 2>/dev/null) || true
   >&2 echo "SSM status: ${ssm_status:-Inactive}"
   [ "$ssm_status" = "Online" ] && break
-  pause 5
+  interruptible sleep 5
 done
 
 if [ "$ssm_status" != "Online" ]; then

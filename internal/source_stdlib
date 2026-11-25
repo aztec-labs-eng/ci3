@@ -113,4 +113,16 @@ function pr_link {
   fi
 }
 
-export -f hash_str hash_str_orig echo_stderr uuid get_num_cpus get_num_cpus_max get_threads_per_core urlencode term_link ci_term_link pr_link github_status_context_prefix
+# Runs a command in the background and waits for it, so that a signal to this shell is handled at once
+# rather than when the command finishes: bash runs a trap only once its foreground command is done.
+# The command's pid is in $interruptible_pid while it runs, for a trap that should stop it too.
+function interruptible {
+  "$@" &
+  interruptible_pid=$!
+  local rc=0
+  wait "$interruptible_pid" || rc=$?
+  interruptible_pid=
+  return $rc
+}
+
+export -f interruptible hash_str hash_str_orig echo_stderr uuid get_num_cpus get_num_cpus_max get_threads_per_core urlencode term_link ci_term_link pr_link github_status_context_prefix

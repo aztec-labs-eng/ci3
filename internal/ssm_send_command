@@ -20,6 +20,7 @@
 #   4. Exits with the remote command's exit code.
 
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/source_stdlib"
 
 iid=${1:?"usage: ssm_send_command <instance-id> <script | ->"}
 shift
@@ -131,8 +132,7 @@ while true; do
         echo "Instance $iid is $inst_state; aborting SSM poll." >&2
         exit 1
       fi
-      sleep 5 &
-      wait $!
+      interruptible sleep 5
       ;;
     *)
       if (( SECONDS - last_log >= 600 )); then
@@ -140,9 +140,7 @@ while true; do
         echo "SSM command $command_id still $status after ${elapsed}m." >&2
         last_log=$SECONDS
       fi
-      # In the background, so a signal cancels the command at once rather than after the sleep.
-      sleep 5 &
-      wait $!
+      interruptible sleep 5
       ;;
   esac
 done

@@ -86,12 +86,12 @@ function cleanup {
 # an instance request in flight records its instance before cleanup reads it. Repeated signals, such
 # as a second Ctrl-C or CI's SIGTERM after its SIGINT, are ignored until cleanup is done, and so is
 # SIGPIPE: the log readers on our stdout may already be gone, and cleanup must not die writing to them.
-child_pid=
+interruptible_pid=
 function on_signal {
   trap '' SIGINT SIGTERM SIGPIPE
-  if [ -n "$child_pid" ]; then
-    kill -TERM "$child_pid" 2>/dev/null
-    wait "$child_pid" 2>/dev/null
+  if [ -n "$interruptible_pid" ]; then
+    kill -TERM "$interruptible_pid" 2>/dev/null
+    wait "$interruptible_pid" 2>/dev/null
   fi
   cleanup >/dev/null 2>&1
   trap - EXIT
@@ -99,16 +99,6 @@ function on_signal {
 }
 trap on_signal SIGINT SIGTERM
 trap 'cleanup >/dev/null 2>&1' EXIT
-
-# Runs a command in the background and waits for it, so a signal is handled while it runs.
-function interruptible {
-  "$@" &
-  child_pid=$!
-  local rc=0
-  wait "$child_pid" || rc=$?
-  child_pid=
-  return $rc
-}
 
 # Verify that the commit exists on the remote. --negotiate-only asks origin which commits it has in
 # common with this tip and transfers no objects, so the commit itself appears in the output only
