@@ -221,6 +221,11 @@ check "bench commands are listed the same way, keyed by the bench target" \
 rm -rf "$keys"
 
 echo "step: path lists"
+mkdir -p tracked && echo keep >tracked/keep.txt && git add tracked/keep.txt && git commit -qm tracked
+printf 'tracked-out:\n\t$(call step,$@,.,build,tracked)\n' >>Makefile
+check "a path list holding tracked files is refused, and deletes nothing" \
+  '! make -s tracked-out >"$tmp/make.log" 2>&1 && grep -q "include files git tracks" "$tmp/make.log" && [ -f tracked/keep.txt ]'
+git checkout -q Makefile
 mkdir -p p
 echo '^p/' >p/.rebuild_patterns
 printf '%s\n' '#!/usr/bin/env bash' 'echo "p $1" >>"$RUNS"' 'mkdir -p out && echo built >out/p.txt' >p/bootstrap.sh

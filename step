@@ -37,7 +37,8 @@
 #               Benchmark commands (step_benches) go the same way.
 #   <paths...>  transitional, for tools that keep their outputs in working directories of their own: these
 #               paths, relative to the project, are cached and restored in place instead of $STEP_OUT. They
-#               are the step's: they are removed before a restore or build. Their stamps go in ci3-out/<target>.
+#               are the step's: they are removed before a restore or build, so a path holding anything git
+#               tracks is refused. Their stamps go in ci3-out/<target>.
 # A <bootstrap command> of - runs nothing: the target only groups its prerequisites (see step_group).
 #
 # The command runs as `./bootstrap.sh <bootstrap command>` under denoise. After an upload, the key and its
@@ -55,6 +56,15 @@ fi
 target=$1 command=$2 outputs=$3
 shift 3
 out_rel=ci3-out/$target
+# A path list names what the step produces, which it deletes before a restore or a build: it must not hold anything
+# git tracks. Checked before anything else, so a plan finds it too.
+if [ -n "$outputs" ] && [ "$outputs" != never ] && [ "$outputs" != tests ] &&
+  tracked=$(git ls-files -- $outputs | head -n 3) && [ -n "$tracked" ]; then
+  echo_stderr "step: $target: its outputs ($outputs) include files git tracks, such as:"
+  echo_stderr "$(sed 's/^/  /' <<<"$tracked")"
+  echo_stderr "  It deletes its outputs before a restore or build: name only what the build writes."
+  exit 1
+fi
 keys=${CI3_KEYS_DIR:?step: CI3_KEYS_DIR is not set. Include ci3/step.mk in the Makefile.}
 
 # Prints what a prerequisite contributes to the key: the hash of its outputs, or else its key. A step wrote
