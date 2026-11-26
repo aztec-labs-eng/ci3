@@ -242,6 +242,12 @@ if [ -z "$outputs" ]; then
 fi
 denoise "./bootstrap.sh $command"
 
+missing=$(for path in $outputs; do [ -e "$path" ] || echo "$path"; done)
+if [ -n "$missing" ]; then
+  echo_stderr "step: $target: the build did not write these outputs: $(paste -sd' ' <<<"$missing")"
+  exit 1
+fi
+
 if [ -z "$outputs" ]; then
   out=$(step_output_hash "$out_rel")
   stamp "$out"

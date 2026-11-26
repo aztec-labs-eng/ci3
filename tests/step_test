@@ -243,6 +243,10 @@ check "a restore clears what was there" '[ -z "$(build warm pl)" ] && [ -f p/out
 check "and the outputs leave the work tree clean" '[ -z "$(git status --porcelain)" ]'
 rm -rf p/out
 check "missing outputs are not up to date" '[ -z "$(build warm pl)" ] && [ -f p/out/p.txt ]'
+printf 'missing-out:\n\t$(call step,$@,p,build,out nothere)\n' >>Makefile
+check "a path the build did not write is named" \
+  '! make -s missing-out >"$tmp/make.log" 2>&1 && grep -q "did not write these outputs: nothere" "$tmp/make.log"'
+git checkout -q Makefile
 # An artifact from before output hashes: restoring it computes the hash.
 a_tar=$(ls "$CACHE_LOCAL_DIR"/a-*.tar.gz | head -1)
 mkdir "$tmp/old" && tar -xzf "$a_tar" -C "$tmp/old" && rm "$tmp/old/ci3-out/a/.outhash"
