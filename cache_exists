@@ -20,6 +20,11 @@ fi
 
 tar_file="$1"
 
+# The local cache counts, as it does for cache_download, which would be served from it.
+if [[ -n "${CACHE_LOCAL_DIR:-}" ]] && [[ -f "$CACHE_LOCAL_DIR/$tar_file" ]]; then
+  exit 0
+fi
+
 # Check if artifact exists in S3
 if [[ -n "${S3_BUILD_CACHE_AWS_PARAMS:-}" ]]; then
   # Use AWS CLI to check object existence

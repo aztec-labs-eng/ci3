@@ -1,0 +1,258 @@
+#!/usr/bin/env bash
+# Steps (step, step_legacy, step_plan, step.mk) on a toy repository with a local cache.
+#
+#   a  step: builds $STEP_OUT/a.txt from its source, after c (only order-only prerequisites). Its inputs
+#      include a/notes.txt, which the build does not use: changing it rebuilds a to the same outputs.
+#   c  step: a check (outputs -), which a and b run after (order-only), so not part of their keys
+#   l  not a step: a recipe run through step_legacy, keyed by its ./bootstrap.sh hash, writing l/out
+#   b  step: uses a's and l's outputs, so both are in its key
+#
+# Each project's bootstrap.sh logs what it ran to runs.log, which is what the cases check.
+set -euo pipefail
+
+ci3="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+tmp=$(mktemp -d)
+[ -n "${STEP_TEST_KEEP:-}" ] && echo "keeping $tmp" || trap 'rm -rf "$tmp"' EXIT
+passed=0
+failed=0
+pass() { echo -e "  \033[32m✓ $1\033[0m"; ((++passed)); }
+fail() { echo -e "  \033[31m✗ $1\033[0m"; ((++failed)); }
+check() { if eval "$2"; then pass "$1"; else fail "$1"; fi; }
+
+# No redis, no S3: an aws with credentials but no S3 access, so the cache is CACHE_LOCAL_DIR alone, and
+# step's records go to files.
+mkdir -p "$tmp/bin"
+printf '%s\n' '#!/usr/bin/env bash' '[ "$1 $2" = "configure export-credentials" ] && exit 0' 'exit 1' >"$tmp/bin/aws"
+chmod +x "$tmp/bin/aws"
+export PATH="$tmp/bin:$PATH"
+export CI=0 CI_REDIS_AVAILABLE=0 DASHBOARD_URL=http://dashboard.invalid DENOISE=0
+export S3_FORCE_UPLOAD=1 S3_BUILD_CACHE_AWS_PARAMS="--endpoint-url http://s3.invalid"
+export CACHE_LOCAL_DIR="$tmp/cache" CI3_STEP_RECORD_DIR="$tmp/records"
+export GITHUB_REPOSITORY=test/repo DEFAULT_BRANCH=main REF_NAME=main
+export CI3="$ci3"
+unset CI3_KEYS_DIR CI3_KEYS_ONLY CI3_PLAN TARGET_BRANCH
+
+repo="$tmp/repo"
+mkdir -p "$repo"/{a,b,c,l}
+cd "$repo"
+git init -q -b main .
+git config user.email t@t
+git config user.name t
+
+for p in a b c l; do
+  echo "^$p/" >"$p/.rebuild_patterns"
+  echo "$p v1" >"$p/src.txt"
+done
+echo "notes v1" >a/notes.txt
+cat >a/bootstrap.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+echo "a $1" >>"$RUNS"
+tr a-z A-Z <src.txt >"$STEP_OUT/a.txt"
+EOF
+cat >b/bootstrap.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "$1" = test_cmds ]; then
+  echo "$STEP_KEY cd b && grep -q B b/src.txt"
+  exit 0
+fi
+if [ "$1" = bench_cmds ]; then
+  echo "$STEP_KEY:CPUS=2 b/bench.sh"
+  exit 0
+fi
+echo "b $1" >>"$RUNS"
+{ cat ../a/ci3-out/a/a.txt ../l/out/l.txt src.txt; echo "STEP_KEY=$STEP_KEY CI3_KEY_A=$CI3_KEY_A CI3_KEY_L=$CI3_KEY_L"; } >"$STEP_OUT/b.txt"
+EOF
+cat >c/bootstrap.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+echo "c $1" >>"$RUNS"
+grep -q v src.txt
+EOF
+cat >l/bootstrap.sh <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  hash) echo "legacy-$(git hash-object src.txt)" ;;
+  build) echo "l build" >>"$RUNS"; mkdir -p out && cp src.txt out/l.txt ;;
+esac
+EOF
+chmod +x */bootstrap.sh
+printf '%s\n' 'out/' 'ci3-out/' >.gitignore
+echo 'tests: []' >.test_patterns.yml
+
+{
+  echo 'SHELL := /bin/bash'
+  echo 'ROOT := $(shell git rev-parse --show-toplevel)'
+  echo 'include $(CI3)/step.mk'
+  echo 'define run_command'
+  printf '\t@$(CI3)/step_legacy $(1) $(ROOT)/$(2) "$(3)"\n'
+  echo 'endef'
+  echo '.PHONY: all a b c l'
+  echo 'all: b'
+  echo 'a: private INPUTS := a/.rebuild_patterns'
+  echo 'a: | c'
+  printf '\t$(call step,$@,a,build)\n'
+  echo 'c: private INPUTS := c/.rebuild_patterns'
+  echo 'c:'
+  printf '\t$(call step,$@,c,build)\n'
+  echo 'l:'
+  printf "\t\$(call run_command,\$@,l,./bootstrap.sh build)\n"
+  echo 'b: private INPUTS := b/.rebuild_patterns'
+  echo 'b: a l | c'
+  printf '\t$(call step,$@,b,build)\n'
+  echo 'b-tests: private INPUTS := b/.rebuild_patterns'
+  echo 'b-tests: b'
+  printf '\t$(call step_tests,$@,b)\n'
+  echo 'b-benches: b'
+  printf '\t$(call step_benches,$@,b)\n'
+} >Makefile
+git add -A
+git commit -qm init
+
+export RUNS="$tmp/runs.log"
+# Runs make from clean outputs (warm: from the outputs already there), and prints what the bootstrap scripts
+# ran, sorted.
+function build {
+  [ "${1:-}" = warm ] && shift || rm -rf {a,b,c}/ci3-out l/out
+  rm -f "$RUNS"
+  touch "$RUNS"
+  make -s "$@" >"$tmp/make.log" 2>&1 || { cat "$tmp/make.log"; return 1; }
+  sort "$RUNS" | paste -sd' ' -
+}
+function commit {
+  echo "$2" >"$1/src.txt"
+  git commit -qam "$1: $2"
+}
+
+echo "step: keys before any build"
+keys=$(mktemp -d)
+CI3_KEYS_ONLY=1 CI3_KEYS_DIR=$keys make -s b >/dev/null 2>&1
+check "a step never built hands on a guess that matches nothing" 'grep -qx "a=unknown-$(<"$keys/a")" "$keys/b.parts"'
+rm -rf "$keys"
+
+echo "step: building"
+check "a cold build runs everything" '[ "$(build)" = "a build b build c build l build" ]'
+check "b's command sees its own key and each prerequisite's" \
+  'grep -qE "STEP_KEY=[0-9a-f]{16} CI3_KEY_A=[0-9a-f]{16} CI3_KEY_L=legacy-[0-9a-f]{40}$" b/ci3-out/b/b.txt'
+check "outputs are cached as <target>-<key>.tar.gz" 'ls "$CACHE_LOCAL_DIR" | grep -qE "^b-[0-9a-f]{16}\.tar\.gz$"'
+check "nothing changed: steps are restored, the check is skipped, only the legacy recipe runs" '[ "$(build)" = "l build" ]'
+check "a restored step has its outputs" 'grep -q "A V1" b/ci3-out/b/b.txt'
+check "a hit is one line" '[ "$(grep -c "\[a\]" "$tmp/make.log")" -eq 1 ] && grep -q "\[a\].*restored from the cache" "$tmp/make.log"'
+check "outputs already there for the key: nothing runs, nothing is restored" '[ "$(build warm)" = "l build" ] && grep -q "\[a\].*up to date" "$tmp/make.log"'
+check "outputs leave the work tree clean" '[ -z "$(git status --porcelain)" ]'
+
+commit c "c v2"
+check "a changed check reruns, and b, which only runs after it, is restored" '[ "$(build)" = "c build l build" ]'
+commit l "l v2"
+check "a changed legacy prerequisite rebuilds b" '[ "$(build)" = "b build l build" ]'
+commit a "a v2"
+check "a changed step rebuilds itself and what uses it" '[ "$(build)" = "a build b build l build" ]'
+echo "notes v2" >a/notes.txt && git commit -qam "a: notes"
+check "early cutoff: a rebuilt to the same outputs leaves b cached" '[ "$(build)" = "a build l build" ]'
+
+echo "step: keys only"
+keys=$(mktemp -d)
+check "keys-only mode runs nothing" '[ -z "$(CI3_KEYS_ONLY=1 CI3_KEYS_DIR=$keys build)" ]'
+check "keys-only mode records every step's key" '[ -s "$keys/a" ] && [ -s "$keys/b" ] && [ -s "$keys/c" ]'
+build >/dev/null
+check "the keys are the ones a build uses" 'grep -q "STEP_KEY=$(<"$keys/b") " b/ci3-out/b/b.txt'
+rm -rf "$keys"
+
+echo "step_plan"
+plan=$("$ci3/step_plan" all 2>&1 | sed 's/\x1b\[[0-9;]*m//g' || true)
+check "everything built and in place: all up to date" 'grep -q "Steps: 0 to build, 0 cached if .*, 0 cached, 3 up to date" <<<"$plan"'
+check "plan counts the targets it cannot plan" 'grep -q "Not planned: 1 targets" <<<"$plan"'
+rm -rf {a,b,c}/ci3-out
+plan=$("$ci3/step_plan" all 2>&1 | sed 's/\x1b\[[0-9;]*m//g' || true)
+check "outputs gone: all cached" 'grep -q "Steps: 0 to build, 0 cached if .*, 3 cached" <<<"$plan"'
+commit a "a v3"
+: >"$RUNS"
+plan=$("$ci3/step_plan" all 2>&1 | sed 's/\x1b\[[0-9;]*m//g' || true)
+echo "$plan" | sed 's/^/    /'
+check "plan names the input that changed" 'grep -qE "^.*a  [0-9a-f]+  BUILD  changed: a/src.txt" <<<"$plan"'
+check "plan says b is cached if a builds to the same outputs" 'grep -qE "b  [0-9a-f]+  cached if a unchanged" <<<"$plan"'
+check "plan marks the check as running first, cached" 'grep -qE "c \(runs first\)  [0-9a-f]+  cached" <<<"$plan"'
+check "plan tells order-only from normal prerequisites when a step has only order-only ones" \
+  '[ "$(grep -cE "c \(runs first\)" <<<"$plan")" -eq 2 ]'
+check "plan shows the legacy prerequisite as not a step" 'grep -qE "l  +not a step" <<<"$plan"'
+check "planning built nothing" '[ ! -s "$RUNS" ]'
+build >/dev/null
+echo "notes v3" >a/notes.txt && git commit -qam "a: notes v3"
+plan=$("$ci3/step_plan" all 2>&1 | sed 's/\x1b\[[0-9;]*m//g' || true)
+check "and the build bears it out when a's outputs do not change" '[ "$(build)" = "a build l build" ]'
+commit a "a v4"
+build >/dev/null
+commit a "a v5"
+check "and when a's outputs do change, b rebuilds" '[ "$(build)" = "a build b build l build" ]'
+rm -f "$CACHE_LOCAL_DIR"/a-*
+build >/dev/null
+rm -rf "$CACHE_LOCAL_DIR"/a-* a/ci3-out
+plan=$("$ci3/step_plan" all 2>&1 | sed 's/\x1b\[[0-9;]*m//g' || true)
+check "plan tells an evicted key from a changed one" 'grep -q "but no longer in the cache" <<<"$plan"'
+
+echo "step: uncommitted changes"
+build >/dev/null
+echo "a dirty" >a/src.txt
+a_before=$(ls "$CACHE_LOCAL_DIR" | grep -c "^a-")
+check "a dirty input builds its step and what uses it" '[ "$(build)" = "a build b build l build" ]'
+check "uploads nothing of the dirty step" '[ "$(ls "$CACHE_LOCAL_DIR" | grep -c "^a-")" -eq "$a_before" ]'
+plan=$("$ci3/step_plan" all 2>&1 | sed 's/\x1b\[[0-9;]*m//g' || true)
+check "plan says the step with changes is uncached" 'grep -qE "a  -  uncached  uncommitted changes to its inputs" <<<"$plan"'
+check "and what uses it is cached if a builds to the same outputs" 'grep -qE "b  [0-9a-f]+  cached if a unchanged" <<<"$plan"'
+git checkout -q a/src.txt
+
+echo "step_tests"
+export CI3_TEST_CMDS_FILE="$tmp/test_cmds"
+rm -f "$CI3_TEST_CMDS_FILE"
+make -s b-tests >"$tmp/make.log" 2>&1 || cat "$tmp/make.log"
+keys=$(mktemp -d)
+CI3_KEYS_ONLY=1 CI3_KEYS_DIR=$keys make -s b-tests >/dev/null 2>&1
+check "test commands are prefixed with the test target's key" \
+  'grep -qxF "$(<"$keys/b-tests"):MAKEFILE_TARGET=b cd b && grep -q B b/src.txt" "$CI3_TEST_CMDS_FILE"'
+check "which comes from b's outputs" 'grep -qx "b=$(<"$keys/b.out")" "$keys/b-tests.parts"'
+check "keys-only mode lists no tests" '[ "$(wc -l <"$CI3_TEST_CMDS_FILE")" -eq 1 ]'
+rm -f "$CI3_TEST_CMDS_FILE"
+make -s b-benches >"$tmp/make.log" 2>&1 || cat "$tmp/make.log"
+CI3_KEYS_ONLY=1 CI3_KEYS_DIR=$keys make -s b-benches >/dev/null 2>&1
+check "bench commands are listed the same way, keyed by the bench target" \
+  'grep -qxF "$(<"$keys/b-benches"):CPUS=2:MAKEFILE_TARGET=b-benches b/bench.sh" "$CI3_TEST_CMDS_FILE"'
+rm -rf "$keys"
+
+echo "step: path lists"
+mkdir -p tracked && echo keep >tracked/keep.txt && git add tracked/keep.txt && git commit -qm tracked
+printf 'tracked-out:\n\t$(call step,$@,.,build,tracked)\n' >>Makefile
+check "a path list holding tracked files is refused, and deletes nothing" \
+  '! make -s tracked-out >"$tmp/make.log" 2>&1 && grep -q "include files git tracks" "$tmp/make.log" && [ -f tracked/keep.txt ]'
+git checkout -q Makefile
+mkdir -p p
+echo '^p/' >p/.rebuild_patterns
+printf '%s\n' '#!/usr/bin/env bash' 'echo "p $1" >>"$RUNS"' 'mkdir -p out && echo built >out/p.txt' >p/bootstrap.sh
+chmod +x p/bootstrap.sh
+{
+  echo 'pl: private INPUTS := p/.rebuild_patterns'
+  echo 'pl:'
+  printf '\t$(call step,$@,p,build,out)\n'
+} >>Makefile
+git add -A && git commit -qm "p"
+check "a path-list step builds and caches its paths" '[ "$(build warm pl)" = "p build" ] && [ -f p/out/p.txt ]'
+check "then is up to date" '[ -z "$(build warm pl)" ] && grep -q "\[pl\].*up to date" "$tmp/make.log"'
+touch p/out/stale.txt && rm p/ci3-out/pl/.key
+check "a restore clears what was there" '[ -z "$(build warm pl)" ] && [ -f p/out/p.txt ] && [ ! -e p/out/stale.txt ]'
+check "and the outputs leave the work tree clean" '[ -z "$(git status --porcelain)" ]'
+rm -rf p/out
+check "missing outputs are not up to date" '[ -z "$(build warm pl)" ] && [ -f p/out/p.txt ]'
+printf 'missing-out:\n\t$(call step,$@,p,build,out nothere)\n' >>Makefile
+check "a path the build did not write is named" \
+  '! make -s missing-out >"$tmp/make.log" 2>&1 && grep -q "did not write these outputs: nothere" "$tmp/make.log"'
+git checkout -q Makefile
+# An artifact from before output hashes: restoring it computes the hash.
+a_tar=$(ls "$CACHE_LOCAL_DIR"/a-*.tar.gz | head -1)
+mkdir "$tmp/old" && tar -xzf "$a_tar" -C "$tmp/old" && rm "$tmp/old/ci3-out/a/.outhash"
+tar -czf "$a_tar" -C "$tmp/old" ci3-out
+check "an artifact without an output hash restores" 'git checkout -q "$(git log --format=%H -1 -- a/src.txt)" -- a 2>/dev/null; build >/dev/null && [ -s a/ci3-out/a/.outhash ]'
+
+echo
+echo "step_test: $passed passed, $failed failed"
+[ "$failed" -eq 0 ]

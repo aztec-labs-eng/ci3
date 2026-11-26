@@ -1,0 +1,268 @@
+#!/usr/bin/env bash
+# Runs one step of a build: a make target whose cache key ci3 derives from the make dependency graph.
+#
+#   step <target> <bootstrap command> [<outputs>] [prerequisite...]
+#
+# The `step` macro in step.mk calls it from the project's directory, with the target's normal prerequisites
+# ($^) as arguments, and these in the environment:
+#   INPUTS      rebuild patterns (pattern files, directories or ^regexes) relative to the repository root
+#   AFTER       the order-only prerequisites ($|): they run first, but are not part of the key
+#   KEY_ENV     names of environment variables whose values change the outputs
+#   KEY_SALT    anything else to fold into the key, such as a version bumped by hand
+#   CI3_KEYS_DIR      one directory per make run (step.mk makes it)
+#   CI3_TOOLCHAIN_ID  set by the repository: what builds the outputs, such as a build image's digest
+#
+# The key hashes the target's name, its inputs, the KEY_ENV values, KEY_SALT, the toolchain and, for each
+# prerequisite, a hash of the outputs it produced (its key, for one with no outputs of its own: never, a group,
+# or a recipe that is not a step yet). Keying on outputs is what stops a rebuild spreading: a prerequisite
+# whose inputs changed but whose outputs came out the same leaves the steps that use it cached. The make graph is the only statement of what depends on what: nothing here or in the
+# bootstrap scripts repeats it. A step's own key is exported as STEP_KEY, and each prerequisite's as
+# CI3_KEY_<NAME> (non-alphanumerics as _), for a command that caches finer than its target, per item.
+# A prerequisite that is not a step yet (a recipe run through step_legacy) is keyed by its project's
+# `./bootstrap.sh hash`.
+#
+# Outputs: the command writes what it produces to $STEP_OUT, <project>/ci3-out/<target>, which step empties
+# first, and anything that uses it reads it from there. That directory is what is cached, as
+# <target>-<key>.tar.gz, with the key stamped in it as .key:
+#   - the stamp matches the key: the outputs are already there, and nothing runs ("up to date")
+#   - the key is in the cache: it is restored, and nothing runs
+#   - otherwise the command runs, and its outputs are uploaded
+# A check writes nothing to $STEP_OUT: its cached stamp records the pass. The repository ignores ci3-out/.
+#
+# <outputs> is otherwise empty, except:
+#   never       always runs, as for a command that caches per item itself
+#   tests       always runs `./bootstrap.sh <command>`, which prints test commands, each prefixed with the
+#               key they are cached under: $STEP_KEY, rather than a hash of the bootstrap's own. They go
+#               through filter_test_cmds to the test engine's file, CI3_TEST_CMDS_FILE (/tmp/test_cmds).
+#               Benchmark commands (step_benches) go the same way.
+#   <paths...>  transitional, for tools that keep their outputs in working directories of their own: these
+#               paths, relative to the project, are cached and restored in place instead of $STEP_OUT. They
+#               are the step's: they are removed before a restore or build, so a path holding anything git
+#               tracks is refused. Their stamps go in ci3-out/<target>.
+# A <bootstrap command> of - runs nothing: the target only groups its prerequisites (see step_group).
+#
+# The command runs as `./bootstrap.sh <bootstrap command>` under denoise. After an upload, the key and its
+# ingredients are recorded, so step_plan can explain the next rebuild (internal/source_step).
+#
+# CI3_KEYS_ONLY=1 records the key and stops: nothing is built, downloaded or uploaded. With CI3_PLAN=1 as
+# well, it also asks the cache whether the key is there. step_plan runs make this way.
+NO_CD=1 source $(dirname "${BASH_SOURCE[0]}")/source
+source $ci3/internal/source_step
+
+if [ "$#" -lt 3 ]; then
+  echo_stderr "Usage: step <target> <bootstrap command> <outputs or ''> [prerequisite...]"
+  exit 1
+fi
+target=$1 command=$2 outputs=$3
+shift 3
+out_rel=ci3-out/$target
+# A path list names what the step produces, which it deletes before a restore or a build: it must not hold anything
+# git tracks. Checked before anything else, so a plan finds it too.
+if [ -n "$outputs" ] && [ "$outputs" != never ] && [ "$outputs" != tests ] &&
+  tracked=$(git ls-files -- $outputs | head -n 3) && [ -n "$tracked" ]; then
+  echo_stderr "step: $target: its outputs ($outputs) include files git tracks, such as:"
+  echo_stderr "$(sed 's/^/  /' <<<"$tracked")"
+  echo_stderr "  It deletes its outputs before a restore or build: name only what the build writes."
+  exit 1
+fi
+keys=${CI3_KEYS_DIR:?step: CI3_KEYS_DIR is not set. Include ci3/step.mk in the Makefile.}
+
+# Prints what a prerequisite contributes to the key: the hash of its outputs, or else its key. A step wrote
+# its own. One still run by step_legacy is keyed by its project's ./bootstrap.sh hash, computed once per make
+# run by whichever step needs it first.
+function prerequisite_value {
+  local dep=$1 dir legacy_key
+  if [ ! -f "$keys/$dep" ] && [ -f "$keys/$dep.legacy" ]; then
+    dir=$(<"$keys/$dep.legacy")
+    if ! legacy_key=$(cd "$dir" && ./bootstrap.sh hash 2>/dev/null | tail -n 1) || [ -z "$legacy_key" ]; then
+      echo_stderr "step: $target: prerequisite $dep is not a step, and '$dir/bootstrap.sh hash' failed: not caching."
+      legacy_key=disabled-cache
+    fi
+    echo "$legacy_key" >"$keys/$dep.$$" && mv "$keys/$dep.$$" "$keys/$dep"
+  fi
+  if [ -f "$keys/$dep.out" ]; then
+    cat "$keys/$dep.out"
+  elif [ -f "$keys/$dep" ]; then
+    cat "$keys/$dep"
+  else
+    echo_stderr "step: $target: prerequisite $dep has no key. Make it a step, run its recipe through step_legacy,"
+    echo_stderr "  or, for a target that only groups others, give it the recipe \$(call step_group,\$@)."
+    return 1
+  fi
+}
+
+# --- The key -----------------------------------------------------------------------------------------------
+# One ingredient per line, "<name>=<value>". step_plan compares them with the last build's.
+parts=("target=$target")
+[ -n "${CI3_TOOLCHAIN_ID:-}" ] && parts+=("toolchain=$CI3_TOOLCHAIN_ID")
+# Patterns are relative to the repository root, wherever the project is.
+[ -n "${INPUTS:-}" ] && parts+=("inputs=$(cd "$root" && cache_content_hash $INPUTS)")
+for name in ${KEY_ENV:-}; do
+  parts+=("env:$name=${!name:-}")
+done
+[ -n "${KEY_SALT:-}" ] && parts+=("salt=$KEY_SALT")
+# In a plan, a prerequisite that has to build has unknown outputs. It offers a guess, that they come out as
+# they did last time, and names itself in its .cond: this step's answer then holds only if the guess does.
+conds=()
+for dep in "$@"; do
+  dep_value=$(prerequisite_value "$dep")
+  parts+=("$dep=$dep_value")
+  dep_var=${dep//[^A-Za-z0-9]/_}
+  export "CI3_KEY_${dep_var^^}=$dep_value"
+  [ -s "$keys/$dep.cond" ] && conds+=($(<"$keys/$dep.cond"))
+done
+# hash_str gives disabled-cache when any ingredient is, as with uncommitted changes to the inputs.
+key=$(hash_str "${parts[*]}")
+
+# --- Record it for the targets after this one, and for step_plan -------------------------------------------
+printf '%s\n' "${parts[@]}" >"$keys/$target.parts"
+printf '%s\n' "$@" >"$keys/$target.deps"
+printf '%s\n' ${AFTER:-} >"$keys/$target.after"
+echo "${INPUTS:-}" >"$keys/$target.inputs"
+echo "$key" >"$keys/$target"
+
+artifact=$target-$key.tar.gz
+
+# Whether this key's outputs are already in place: the stamps in ci3-out/<target> (beside the outputs in
+# $STEP_OUT, or alone for a path list) name the key, and a path list's paths all exist.
+function up_to_date {
+  [ "$key" != disabled-cache ] && [ "$(cat "$out_rel/.key" 2>/dev/null)" = "$key" ] && [ -s "$out_rel/.outhash" ] ||
+    return 1
+  local path
+  for path in $outputs; do [ -e "$path" ] || return 1; done
+}
+
+# Stamps the outputs in place with their key and output hash.
+function stamp {
+  mkdir -p "$out_rel"
+  echo "$key" >"$out_rel/.key"
+  echo "$1" >"$out_rel/.outhash"
+}
+
+# Hands the steps after this one what it contributes to their keys.
+function publish {
+  echo "$1" >"$keys/$target.out.$$" && mv "$keys/$target.out.$$" "$keys/$target.out"
+}
+
+# The output hash of the last recorded build, as the plan's guess for a step that has to build; with no record,
+# a value that matches nothing.
+function guess_output_hash {
+  local out
+  out=$(step_record_read "$target" 2>/dev/null | sed -n 3p) || true
+  echo "${out:-unknown-$key}"
+}
+
+# --- Keys only (step_plan) ---------------------------------------------------------------------------------
+# What this step will hand on is worked out without building: from outputs already in place, or the output
+# hash recorded for the key. A step that has to build (or whose inputs have uncommitted changes) cannot know
+# its outputs yet: it guesses they come out as at its last build, and names itself in its .cond, so the steps
+# after it say their answer holds only if that guess does.
+if [ "${CI3_KEYS_ONLY:-0}" -eq 1 ]; then
+  if [ "$command" = - ]; then
+    status=group
+  elif [ "$outputs" = never ]; then
+    status=never
+  elif [ "$outputs" = tests ]; then
+    status=tests
+  else
+    guess=
+    if [ "$key" = disabled-cache ]; then
+      status=disabled
+      guess=1
+    elif up_to_date; then
+      status=current
+      publish "$(<"$out_rel/.outhash")"
+    elif out=$(step_out_read "$target" "$key"); then
+      # Recorded at upload, so the key is (or was) in the cache: the plan checks it is still there.
+      status=hit
+      publish "$out"
+      if [ "${CI3_PLAN:-0}" -eq 1 ] && ! cache_exists "$artifact"; then
+        status=miss
+        guess=1
+      fi
+    elif [ "${CI3_PLAN:-0}" -eq 1 ] && cache_exists "$artifact"; then
+      # In the cache without a recorded output hash (an upload before records): restoring it gives the hash.
+      status=hit
+      guess=1
+    else
+      status=miss
+      guess=1
+    fi
+    if [ -n "$guess" ]; then
+      publish "$(guess_output_hash)"
+      conds+=("$target")
+    fi
+  fi
+  echo "$status" >"$keys/$target.status"
+  printf '%s\n' "${conds[@]}" | awk 'NF && !seen[$0]++' >"$keys/$target.cond"
+  exit 0
+fi
+
+export STEP_KEY=$key
+if [ "$outputs" = tests ]; then
+  export MAKEFILE_TARGET=$target
+  ./bootstrap.sh $command | filter_test_cmds | atomic_append "${CI3_TEST_CMDS_FILE:-/tmp/test_cmds}"
+  exit 0
+fi
+if [ "$command" = - ] || [ "$outputs" = never ]; then
+  [ "$command" = - ] || denoise "./bootstrap.sh $command"
+  exit 0
+fi
+
+# --- Up to date, restore, or build and upload --------------------------------------------------------------
+if up_to_date; then
+  publish "$(<"$out_rel/.outhash")"
+  echo "up to date ($key)."
+  exit 0
+fi
+
+# The outputs are the step's: what was there goes before a restore or a build, so nothing stale survives
+# beside what is restored or built.
+rm -rf "$out_rel" $outputs
+
+# A hit is one line: cache_download's own account only matters when the download fails, and a miss is not
+# a failure.
+start=$SECONDS
+if cache_download "$artifact" &>/dev/null; then
+  if [ -z "$outputs" ]; then
+    # Older artifacts have no .outhash.
+    out=$(cat "$out_rel/.outhash" 2>/dev/null) || out=$(step_output_hash "$out_rel")
+  else
+    out=$(step_out_read "$target" "$key") || out=$(step_output_hash $outputs)
+  fi
+  stamp "$out"
+  publish "$out"
+  echo "restored from the cache ($key) in $((SECONDS - start))s."
+  exit 0
+fi
+
+if [ -z "$outputs" ]; then
+  mkdir -p "$out_rel"
+  export STEP_OUT=$PWD/$out_rel
+fi
+denoise "./bootstrap.sh $command"
+
+missing=$(for path in $outputs; do [ -e "$path" ] || echo "$path"; done)
+if [ -n "$missing" ]; then
+  echo_stderr "step: $target: the build did not write these outputs: $(paste -sd' ' <<<"$missing")"
+  exit 1
+fi
+
+if [ -z "$outputs" ]; then
+  out=$(step_output_hash "$out_rel")
+  stamp "$out"
+  cache_upload "$artifact" "$out_rel"
+else
+  out=$(step_output_hash $outputs)
+  cache_upload "$artifact" $outputs
+  stamp "$out"
+fi
+publish "$out"
+echo "outputs: $out"
+
+# cache_upload succeeds whether or not it uploaded (outside CI, an existing key, no credentials), so record
+# the build only once the artifact is there to be found.
+if [ "$key" != disabled-cache ] && cache_exists "$artifact"; then
+  step_out_write "$target" "$key" "$out" || true
+  { git -C "$root" rev-parse HEAD; echo "$key"; echo "$out"; printf '%s\n' "${parts[@]}"; } | step_record_write "$target" || true
+fi

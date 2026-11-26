@@ -93,6 +93,37 @@ Tools are provided for the following themes.
    - Artifacts can be re-uploaded or flagged as “passed,” letting future runs skip unchanged steps.
 
 
+### Steps (experimental)
+
+A Makefile target can be a **step**: ci3 keys and caches it from the make dependency graph, so a
+bootstrap script no longer has to chain other projects' hashes into its own, and the graph is stated
+once, in the Makefile (ci3#25).
+
+```make
+include $(ROOT)/ci3/step.mk
+
+avm-transpiler-native: private INPUTS := avm-transpiler/.rebuild_patterns
+avm-transpiler-native: | noir-format-check
+	$(call step,$@,avm-transpiler,build_native)
+```
+
+- A step's key hashes its target name, its `INPUTS` (rebuild patterns), any `KEY_ENV` values and `KEY_SALT`,
+  `CI3_TOOLCHAIN_ID`, and the key of each normal prerequisite. Order-only prerequisites (after `|`) run first
+  but are not part of the key.
+- Every step writes its outputs to `$STEP_OUT`, `<project>/ci3-out/<target>`, and whatever uses them reads
+  them there: one place, whatever the tool. That directory is what is cached, as `<target>-<key>.tar.gz`, with
+  the key stamped in it. When the stamp matches, nothing runs ("up to date"); on a hit it is restored, in one
+  line of log; otherwise `./bootstrap.sh <command>` runs and the directory is uploaded. A check writes nothing,
+  and its cached stamp records the pass. A step marked `never` always runs, for a command that caches per item
+  using `STEP_KEY` and the `CI3_KEY_<PREREQUISITE>` variables.
+- A recipe that is not a step yet runs through `step_legacy`; steps that depend on it are keyed by its
+  project's `./bootstrap.sh hash`. A Makefile moves to steps one target at a time.
+- `step_plan [goal]` prints the goal's tree before anything builds: what is cached, what will build and why
+  (the inputs that changed since its last build, a changed prerequisite, or an evicted key), and what is
+  uncached because of uncommitted changes.
+
+`step`, `step_legacy`, `step_plan` and `step.mk` document the details. `tests/step_test` covers them.
+
 ## Interface
 
 ci3 is consumed as a git submodule at `<repo>/ci3`. What a consuming repository may rely on is
@@ -125,6 +156,8 @@ The dependency runs both ways. ci3 reads these from the repository it is buildin
 - `.test_patterns.yml` — test skips, retries, owners and Slack notifications (`filter_test_cmds`, `run_test_cmd`).
 - `scripts/process_flake_log.py` — optional; run by `parallelize` after a test run when present.
 - `build-images/src/home/.gitconfig` — mounted into containers by `docker_isolate`.
+- `ci3-out/` in `.gitignore`, with steps: where each step's outputs are written.
+- `CI3_TOOLCHAIN_ID` — optional; with steps, what builds the outputs (such as the build image's digest), so a new toolchain rebuilds every step.
 - `CI3_EVENT_ENDPOINT`, `CI3_EVENT_TOKEN` and `CI3_EVENT_PROJECT` — optional; when all are set, `bootstrap_ec2` sends a `ci.instance` event per build instance through `send_event` to that OTLP endpoint, for example `https://otel.aztec-labs.com`.
 - **Permission to renew a build instance's lease.** Each build instance shuts itself down, and so terminates, once its `LeaseUntil` tag has passed, and whoever launched it renews that tag every minute while it runs (`internal/source_instance_lease`). The AWS role that launches instances, in CI and on a build instance launching another (such as the benchmark box), needs `ec2:CreateTags` for the `LeaseUntil` key on instances tagged `Group=build-instance`. Without it, every instance shuts down 10 minutes after boot.
 - **`exec` into `bootstrap_ec2` or `bootstrap_ec2_multi`**, all the way from the CI step: `run: exec ./ci.sh fast` in the workflow, `exec bootstrap_ec2 …` in `ci.sh`. CI cancels a job by signalling only the process it started (GitHub Actions sends that one process SIGINT, then SIGTERM, then SIGKILL 10 seconds later), so that process must be the ci3 script that terminates the instances. A script in between that runs it without `exec`, including as part of a pipeline, keeps the signal to itself, and the instances run on until their leases run out. `tests/cancel_test` covers this.
@@ -134,5 +167,5 @@ The dependency runs both ways. ci3 reads these from the repository it is buildin
 A repository pins its own ci3, and a build can involve more than one pin: a repository and a
 submodule of it each use their own. What has to stay compatible across versions is therefore not
 the scripts but the state they share: redis key shapes (`ci-run-<org>/<repo>/<section>`,
-`history_*`, `hb-*`, the test cache), S3 log keys (`logs/<prefix>/<key>.log.gz`), build-cache
-artifact names, and the `<hash>[:VAR=val] <cmd>` test command format.
+`history_*`, `hb-*`, the test cache, step records `ci3-step/<repo>/<branch>/<target>`), S3 log keys (`logs/<prefix>/<key>.log.gz`), build-cache
+artifact names (a step's is `<target>-<key>.tar.gz`), and the `<hash>[:VAR=val] <cmd>` test command format.

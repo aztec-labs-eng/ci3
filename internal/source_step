@@ -1,0 +1,84 @@
+# Records of each step's last build, written by step when it uploads and read by step_plan to explain a
+# rebuild. A record is the commit, the key, the output hash, and the key's ingredients one per line, as step
+# computed them.
+#
+# Also the output hash of each uploaded key (step_out_*), so that a step restored from the cache, or planned
+# as one, gives the steps that use it their key without hashing what it restored.
+#
+# Records are kept per repository, branch and target: in redis for 30 days, or, when CI3_STEP_RECORD_DIR
+# is set, as files under it (tests, and local experiments without redis). Losing one only costs the
+# explanation: step_plan then says it has no record.
+
+function step_record_name {
+  local branch=$1 target=$2
+  echo "ci3-step/$(github_repo)/$branch/$target"
+}
+
+# Usage: <record> | step_record_write <target>
+function step_record_write {
+  local name
+  name=$(step_record_name "${REF_NAME:-}" "$1")
+  if [ -n "${CI3_STEP_RECORD_DIR:-}" ]; then
+    mkdir -p "$(dirname "$CI3_STEP_RECORD_DIR/$name")"
+    cat >"$CI3_STEP_RECORD_DIR/$name"
+  else
+    redis_cli -x SETEX "$name" $((60 * 60 * 24 * 30)) >/dev/null
+  fi
+}
+
+# Prints the most relevant record of a target's last build: this branch's, else the target branch's, else
+# the default branch's. Fails when there is none.
+function step_record_read {
+  local target=$1 branch record
+  for branch in "${REF_NAME:-}" "${TARGET_BRANCH:-}" "$(ci_default_branch 2>/dev/null)"; do
+    [ -n "$branch" ] || continue
+    if [ -n "${CI3_STEP_RECORD_DIR:-}" ]; then
+      record=$(cat "$CI3_STEP_RECORD_DIR/$(step_record_name "$branch" "$target")" 2>/dev/null || true)
+    else
+      record=$(redis_cli GET "$(step_record_name "$branch" "$target")")
+    fi
+    if [ -n "$record" ]; then
+      echo "$record"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Prints a hash of the outputs at the given paths (relative to the working directory): their contents, file
+# names, executable bits and symlinks. ci3's own stamps (.key, .outhash) are left out.
+function step_output_hash {
+  {
+    find "$@" -type l -printf 'L %p %l\n' 2>/dev/null
+    find "$@" -type f -perm -u+x -printf 'X %p\n' 2>/dev/null
+    find "$@" -type f ! -name .key ! -name .outhash -print0 2>/dev/null | xargs -0r sha256sum
+  } | LC_ALL=C sort | sha256sum | cut -c1-16
+}
+
+function step_out_name {
+  echo "ci3-step-out/$(github_repo)/$1-$2"
+}
+
+# Usage: step_out_write <target> <key> <output hash>
+function step_out_write {
+  local name
+  name=$(step_out_name "$1" "$2")
+  if [ -n "${CI3_STEP_RECORD_DIR:-}" ]; then
+    mkdir -p "$(dirname "$CI3_STEP_RECORD_DIR/$name")"
+    echo "$3" >"$CI3_STEP_RECORD_DIR/$name"
+  else
+    redis_cli SETEX "$name" $((60 * 60 * 24 * 30)) "$3" >/dev/null
+  fi
+}
+
+# Usage: step_out_read <target> <key>. Fails when it is not known.
+function step_out_read {
+  local name out
+  name=$(step_out_name "$1" "$2")
+  if [ -n "${CI3_STEP_RECORD_DIR:-}" ]; then
+    out=$(cat "$CI3_STEP_RECORD_DIR/$name" 2>/dev/null || true)
+  else
+    out=$(redis_cli GET "$name" 2>/dev/null || true)
+  fi
+  [ -n "$out" ] && echo "$out"
+}

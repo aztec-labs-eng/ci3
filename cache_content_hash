@@ -36,7 +36,17 @@
 # These are used when iterating on build infrastructure:
 # - AZTEC_CACHE_NO_SCRIPTS: Don't include any shell files (namely bootstrap.sh) in cache patterns.
 # - AZTEC_CACHE_COMMIT: Compute the content hash for artifacts from an earlier commit.
+#
+# With --filter first, it hashes nothing: it prints the repo-relative paths on stdin that the patterns
+# select, one per line, without checking for uncommitted changes. step_plan uses it to name the inputs
+# that changed between two commits: git diff --name-only A B | cache_content_hash --filter <patterns...>
 NO_CD=1 source $(dirname "${BASH_SOURCE[0]}")/source
+
+filter_only=0
+if [ "${1:-}" = --filter ]; then
+  filter_only=1
+  shift
+fi
 
 # Patterns are rooted at the git repository we are in, which may be one nested in the
 # repository being built (hence not $root). The exception is ci3 itself: as a submodule
@@ -121,6 +131,11 @@ awk_prog='
 function filter_paths {
   awk -F'\t' -v mode="$1" "$awk_prog"
 }
+
+if [ "$filter_only" -eq 1 ]; then
+  filter_paths paths
+  exit 0
+fi
 
 cd "$repo_path"
 

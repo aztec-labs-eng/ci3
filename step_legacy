@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Runs a make recipe that is not a step yet, so that a Makefile can move to steps one target at a time.
+#
+#   step_legacy <target> <project dir> <command>
+#
+# It runs <command> as a ci3 Makefile recipe always has, in <project dir> with its output prefixed by the
+# target's name, but first records <project dir>: a step that depends on this target is then keyed by the
+# project's `./bootstrap.sh hash` (see step). In keys-only mode (CI3_KEYS_ONLY=1, as step_plan runs make)
+# it records and runs nothing.
+#
+# A Makefile's own recipe helper calls it in place of color_prefix, e.g.
+#   define run_command
+#   	@$(ROOT)/ci3/step_legacy $(1) $(2) "$(3)"
+#   endef
+# Kept free of ci3/source: it runs for every recipe, including in keys-only runs of the whole graph.
+set -euo pipefail
+
+if [ "$#" -ne 3 ]; then
+  echo "Usage: step_legacy <target> <project dir> <command>" >&2
+  exit 1
+fi
+target=$1 dir=$2 command=$3
+
+if [ -n "${CI3_KEYS_DIR:-}" ]; then
+  (cd "$dir" && pwd) >"$CI3_KEYS_DIR/$target.legacy"
+fi
+[ "${CI3_KEYS_ONLY:-0}" -eq 1 ] && exit 0
+
+cd "$dir"
+exec "$(dirname "${BASH_SOURCE[0]}")/color_prefix" "$target" "$command"
