@@ -21,10 +21,10 @@ fi
 tar_file="$1"
 
 # Check if artifact exists in S3
-if [[ -n "${S3_BUILD_CACHE_AWS_PARAMS:-}" ]]; then
+if [[ -n "${S3_BUILD_CACHE_AWS_PARAMS:-}" ]] || ! cache_is_public; then
   # Use AWS CLI to check object existence
-  if aws $S3_BUILD_CACHE_AWS_PARAMS s3api head-object \
-      --bucket aztec-ci-artifacts \
+  if aws ${S3_BUILD_CACHE_AWS_PARAMS:-} s3api head-object \
+      --bucket "$(cache_bucket)" \
       --key "build-cache/$tar_file" &>/dev/null; then
     exit 0
   else

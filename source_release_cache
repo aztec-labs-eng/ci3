@@ -1,0 +1,23 @@
+# Points the build cache at the release cache. Sourced by a public release before it builds.
+#
+# The shared build cache is written by every CI build instance, including pull request builds, which
+# run code nobody has reviewed yet. A release that read from it would publish whatever an earlier
+# build had uploaded under its content hashes. The release cache is a separate, private bucket that
+# only release build instances can write to (ci3-release-build-instance-role, which only the
+# release environments' AWS roles can launch with) and only they and the release workflows' publish
+# steps can read. So a release still reuses what an earlier release of the same sources built, and
+# reruns stay fast.
+#
+# A private release does not source this: it reads and writes no cache at all (see
+# source_release_target), and must never put anything in a cache a public release reads.
+
+export CI3_CACHE_BUCKET=aztec-ci-release-cache
+
+# On CI, a release that cannot reach its cache is misconfigured: it would rebuild everything and then
+# fail to hand its outputs to the publish step. Fail now rather than after the build. HeadBucket needs
+# s3:ListBucket, which every identity that uses the release cache is granted.
+if [ "${CI:-0}" -eq 1 ] && ! aws ${S3_BUILD_CACHE_AWS_PARAMS:-} s3api head-bucket --bucket "$CI3_CACHE_BUCKET" &>/dev/null; then
+  echo_stderr "The release cache (s3://$CI3_CACHE_BUCKET) is not accessible. A release must run with the" \
+    "release environment's AWS role and the release build instance profile."
+  exit 1
+fi

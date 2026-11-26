@@ -34,7 +34,7 @@ if ! aws configure export-credentials &>/dev/null; then
 fi
 
 if [ -z "${S3_FORCE_UPLOAD:-}" ] && \
-  aws ${S3_BUILD_CACHE_AWS_PARAMS:-} s3 ls "s3://aztec-ci-artifacts/build-cache/$name" &>/dev/null; then
+  aws ${S3_BUILD_CACHE_AWS_PARAMS:-} s3 ls "$(cache_s3_uri "$name")" &>/dev/null; then
     echo_stderr "Skipping upload, already exists: $name"
     exit 0
 fi
@@ -50,8 +50,8 @@ fi
 
 # Save to local cache if enabled.
 if [[ -n "${CACHE_LOCAL_DIR:-}" ]]; then
-  if mkdir -p "$CACHE_LOCAL_DIR" 2>/dev/null; then
-    cp "$out_tar" "$CACHE_LOCAL_DIR/$name"
+  if mkdir -p "$(cache_local_dir)" 2>/dev/null; then
+    cp "$out_tar" "$(cache_local_dir)/$name"
     echo_stderr "Saved $name to local cache."
   else
     echo_stderr "Warning: Cannot create local cache dir $CACHE_LOCAL_DIR, skipping local cache."
@@ -59,7 +59,7 @@ if [[ -n "${CACHE_LOCAL_DIR:-}" ]]; then
 fi
 
 # Pipe tar directly to AWS S3 cp
-if aws ${S3_BUILD_CACHE_AWS_PARAMS:-} s3 cp $out_tar "s3://aztec-ci-artifacts/build-cache/$name" &>/dev/null; then
+if aws ${S3_BUILD_CACHE_AWS_PARAMS:-} s3 cp $out_tar "$(cache_s3_uri "$name")" &>/dev/null; then
   echo_stderr "Cache upload of $name complete in ${SECONDS}s."
 else
   echo_stderr "Cache upload of $name failed."

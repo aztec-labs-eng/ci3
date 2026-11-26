@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 [ -n "${BUILD_SYSTEM_DEBUG:-}" ] && set -x
 set -eu
+NO_CD=1 source $(dirname "${BASH_SOURCE[0]}")/source
 
 # Ensure at least one argument is provided
 if [ "$#" -lt 1 ]; then
@@ -11,7 +12,7 @@ fi
 # Name of the artifact to delete
 name="$1"
 
-s3_path="s3://aztec-ci-artifacts/build-cache/$name"
+s3_path="$(cache_s3_uri "$name")"
 if aws ${S3_BUILD_CACHE_AWS_PARAMS:-} s3 ls "$s3_path" >/dev/null 2>&1; then
   aws ${S3_BUILD_CACHE_AWS_PARAMS:-} s3 rm "$s3_path" >&2
 else

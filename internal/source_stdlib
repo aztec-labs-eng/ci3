@@ -82,6 +82,33 @@ function ci_term_link {
 # The repository ci3 is running for, as "<org>/<repo>". GITHUB_REPOSITORY is set by CI;
 # outside it, fall back to origin's url so links and names still point at the right repo.
 # ci3 is shared by several repositories, so nothing may hardcode one.
+# The build cache cache_* read and write: s3://<bucket>/build-cache/<name>. By default the shared
+# cache every CI build instance writes, which is also public: served over plain HTTP and through
+# build-cache.aztec-labs.com. CI3_CACHE_BUCKET names another (source_release_cache sets it for a
+# release), which is private, so it is read only through authenticated S3, never the public
+# endpoints.
+function cache_bucket {
+  echo "${CI3_CACHE_BUCKET:-aztec-ci-artifacts}"
+}
+
+function cache_s3_uri {
+  echo "s3://$(cache_bucket)/build-cache/$1"
+}
+
+function cache_is_public {
+  [ "$(cache_bucket)" = aztec-ci-artifacts ]
+}
+
+# Where CACHE_LOCAL_DIR keeps a bucket's objects: its own directory for any bucket but the shared
+# one, so a local copy of a shared-cache object never stands in for a private bucket's.
+function cache_local_dir {
+  if cache_is_public; then
+    echo "$CACHE_LOCAL_DIR"
+  else
+    echo "$CACHE_LOCAL_DIR/$(cache_bucket)"
+  fi
+}
+
 function github_repo {
   if [ -z "${GITHUB_REPOSITORY:-}" ]; then
     # -C $root: ci3 is a submodule, so a bare `git` call from inside it would report
@@ -125,4 +152,4 @@ function interruptible {
   return $rc
 }
 
-export -f interruptible hash_str hash_str_orig echo_stderr uuid get_num_cpus get_num_cpus_max get_threads_per_core urlencode term_link ci_term_link pr_link github_status_context_prefix
+export -f cache_bucket cache_s3_uri cache_is_public cache_local_dir interruptible hash_str hash_str_orig echo_stderr uuid get_num_cpus get_num_cpus_max get_threads_per_core urlencode term_link ci_term_link pr_link github_status_context_prefix

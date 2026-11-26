@@ -39,6 +39,9 @@ case "$RELEASE_TARGET" in
       echo_stderr "A public release must read and publish npm from npmjs, not $NPM_REGISTRY."
       exit 1
     fi
+
+    # Never the shared build cache, which any CI build can write.
+    source $ci3/source_release_cache
     ;;
   private)
     # What gets published is code, not configuration: the projects that publish public artifacts

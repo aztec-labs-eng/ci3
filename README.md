@@ -47,6 +47,9 @@ Tools are provided for the following themes.
 1. **Caching**
    - **`cache_content_hash`**: Takes file patterns (or `.rebuild_patterns`) to compute a stable content hash.
    - **`cache_upload`, `cache_download`**: Upload/download `.tar.gz` artifacts from a remote S3-like cache.
+     The shared cache (`s3://aztec-ci-artifacts/build-cache`) is publicly readable and written by every CI build.
+     A public release sources `source_release_cache` first, which points the cache scripts at
+     `aztec-ci-release-cache` (`CI3_CACHE_BUCKET`): a private bucket only release build instances can write.
    - **`cache_upload_flag`, `cache_download_flag`**: Mark or detect a particular test's success state. Avoids re-running long tests.
 
 2. **Test Parallelization & Caching**
@@ -110,7 +113,7 @@ Entry points are sourced by path — `source $(git rev-parse --show-toplevel)/ci
 `source_bootstrap` from a `bootstrap.sh`, or the minimal `source_base` — which puts ci3 on `PATH`,
 so the rest is called by name: `denoise`, `cache_download`, `parallelize`, and so on. `source`
 already brings in redis, the ref name and the cache settings; those fragments are internal and
-never need sourcing separately. Only `source_npm_auth` and `source_release_target` are opt-in.
+never need sourcing separately. Only `source_npm_auth`, `source_release_target` and `source_release_cache` are opt-in.
 
 ### Internal
 
