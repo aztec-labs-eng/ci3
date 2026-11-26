@@ -134,9 +134,12 @@ function publish {
   echo "$1" >"$keys/$target.out.$$" && mv "$keys/$target.out.$$" "$keys/$target.out"
 }
 
-# The output hash of the last recorded build, as the plan's guess for a step that has to build.
-function last_output_hash {
-  step_record_read "$target" 2>/dev/null | sed -n 3p
+# The output hash of the last recorded build, as the plan's guess for a step that has to build; with no record,
+# a value that matches nothing.
+function guess_output_hash {
+  local out
+  out=$(step_record_read "$target" 2>/dev/null | sed -n 3p) || true
+  echo "${out:-unknown-$key}"
 }
 
 # --- Keys only (step_plan) ---------------------------------------------------------------------------------
@@ -176,8 +179,7 @@ if [ "${CI3_KEYS_ONLY:-0}" -eq 1 ]; then
       guess=1
     fi
     if [ -n "$guess" ]; then
-      publish "$(last_output_hash || true)"
-      [ -s "$keys/$target.out" ] || publish "unknown-$key"
+      publish "$(guess_output_hash)"
       conds+=("$target")
     fi
   fi

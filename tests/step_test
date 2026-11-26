@@ -126,6 +126,12 @@ function commit {
   git commit -qam "$1: $2"
 }
 
+echo "step: keys before any build"
+keys=$(mktemp -d)
+CI3_KEYS_ONLY=1 CI3_KEYS_DIR=$keys make -s b >/dev/null 2>&1
+check "a step never built hands on a guess that matches nothing" 'grep -qx "a=unknown-$(<"$keys/a")" "$keys/b.parts"'
+rm -rf "$keys"
+
 echo "step: building"
 check "a cold build runs everything" '[ "$(build)" = "a build b build c build l build" ]'
 check "b's command sees its own key and each prerequisite's" \
