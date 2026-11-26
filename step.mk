@@ -43,6 +43,13 @@ define step_tests
 	  $(CI3)/color_prefix $(1) "$(CI3)/step $(1) 'test_cmds $(3)' tests $^"
 endef
 
+# $(call step_benches,<target>,<project dir>[,<bench_cmds arguments>]): the same for benchmarks, from
+# ./bootstrap.sh bench_cmds, to the file the caller names as CI3_TEST_CMDS_FILE.
+define step_benches
+	@cd $(ROOT)/$(2) && INPUTS='$(INPUTS)' AFTER='$|' KEY_ENV='$(KEY_ENV)' KEY_SALT='$(KEY_SALT)' \
+	  $(CI3)/color_prefix $(1) "$(CI3)/step $(1) 'bench_cmds $(3)' tests $^"
+endef
+
 # $(call step_group,<target>): a target that only groups its prerequisites; its key is theirs.
 define step_group
 	@$(CI3)/step $(1) - never $^

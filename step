@@ -34,6 +34,7 @@
 #   tests       always runs `./bootstrap.sh <command>`, which prints test commands, each prefixed with the
 #               key they are cached under: $STEP_KEY, rather than a hash of the bootstrap's own. They go
 #               through filter_test_cmds to the test engine's file, CI3_TEST_CMDS_FILE (/tmp/test_cmds).
+#               Benchmark commands (step_benches) go the same way.
 #   <paths...>  transitional, for tools that keep their outputs in working directories of their own: these
 #               paths, relative to the project, are cached and restored in place instead of $STEP_OUT. They
 #               are the step's: they are removed before a restore or build. Their stamps go in ci3-out/<target>.

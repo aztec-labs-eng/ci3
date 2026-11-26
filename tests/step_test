@@ -57,6 +57,10 @@ if [ "$1" = test_cmds ]; then
   echo "$STEP_KEY cd b && grep -q B b/src.txt"
   exit 0
 fi
+if [ "$1" = bench_cmds ]; then
+  echo "$STEP_KEY:CPUS=2 b/bench.sh"
+  exit 0
+fi
 echo "b $1" >>"$RUNS"
 { cat ../a/ci3-out/a/a.txt ../l/out/l.txt src.txt; echo "STEP_KEY=$STEP_KEY CI3_KEY_A=$CI3_KEY_A CI3_KEY_L=$CI3_KEY_L"; } >"$STEP_OUT/b.txt"
 EOF
@@ -101,6 +105,8 @@ echo 'tests: []' >.test_patterns.yml
   echo 'b-tests: private INPUTS := b/.rebuild_patterns'
   echo 'b-tests: b'
   printf '\t$(call step_tests,$@,b)\n'
+  echo 'b-benches: b'
+  printf '\t$(call step_benches,$@,b)\n'
 } >Makefile
 git add -A
 git commit -qm init
@@ -201,6 +207,11 @@ check "test commands are prefixed with the test target's key" \
   'grep -qxF "$(<"$keys/b-tests"):MAKEFILE_TARGET=b cd b && grep -q B b/src.txt" "$CI3_TEST_CMDS_FILE"'
 check "which comes from b's outputs" 'grep -qx "b=$(<"$keys/b.out")" "$keys/b-tests.parts"'
 check "keys-only mode lists no tests" '[ "$(wc -l <"$CI3_TEST_CMDS_FILE")" -eq 1 ]'
+rm -f "$CI3_TEST_CMDS_FILE"
+make -s b-benches >"$tmp/make.log" 2>&1 || cat "$tmp/make.log"
+CI3_KEYS_ONLY=1 CI3_KEYS_DIR=$keys make -s b-benches >/dev/null 2>&1
+check "bench commands are listed the same way, keyed by the bench target" \
+  'grep -qxF "$(<"$keys/b-benches"):CPUS=2:MAKEFILE_TARGET=b-benches b/bench.sh" "$CI3_TEST_CMDS_FILE"'
 rm -rf "$keys"
 
 echo "step: path lists"
