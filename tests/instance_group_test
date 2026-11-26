@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# instance_group (internal/source_stdlib): the Group tag of the instances launched with each instance profile, which
+# the launching roles' EC2 and SSM permissions are scoped to.
+set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../internal/source_stdlib"
+
+failures=0
+for pair in \
+  ci3-build-instance-profile:build-instance \
+  ci3-release-build-instance-profile:release-build-instance \
+  ci3-private-build-instance-profile:private-build-instance \
+  ci3-private-release-build-instance-profile:private-release-build-instance; do
+  actual=$(instance_group "${pair%%:*}")
+  if [ "$actual" == "${pair#*:}" ]; then
+    echo "ok: ${pair%%:*}"
+  else
+    echo "FAIL: ${pair%%:*}: expected ${pair#*:}, got $actual"
+    failures=$((failures + 1))
+  fi
+done
+[ $failures -eq 0 ]
