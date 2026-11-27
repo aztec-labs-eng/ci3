@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# Publishes the npm tarballs a release build packed (deploy_npm with NPM_PACK_DIR), from a job that
+# holds no npm credential: npm trusted publishing takes the CI runner's OIDC token, and --provenance
+# links each package to the run. Needs npm >= 11.5.1, and each package's trusted publisher configured
+# on npmjs as the calling repository, workflow and environment.
+#   usage: npm_publish_packed <dir-of-tgz>
+#
+# NPM_PUBLISH_SCOPES  required; the npm scopes this repository publishes, e.g. "@aztec @aztec-labs".
+#                     A tarball outside them is refused.
+# EXPECTED_VERSION    the only version to publish; defaults to GITHUB_REF_NAME without a leading v.
+#                     A tarball at any other version is refused.
+# DRY_RUN=1           runs `npm publish --dry-run` instead.
+#
+# Dist-tags follow deploy_npm: npm_dist_tag names the version's tag, and a version older than the
+# one its tag already points at is published under a tag nothing reads, leaving the tag in place.
+NO_CD=1 source $(dirname "${BASH_SOURCE[0]}")/source
+
+# Absolute: npm parses a relative "dir/name.tgz" as the GitHub shorthand owner/repo.
+dir=$(realpath "${1:?usage: npm_publish_packed <dir-of-tgz>}")
+dry_run=${DRY_RUN:-0}
+scopes=${NPM_PUBLISH_SCOPES:?NPM_PUBLISH_SCOPES is required, e.g. "@aztec @aztec-labs"}
+
+# The tarballs come from a cache keyed by tag, not by content, so each one must be ours and at
+# exactly the released version.
+expected_version=${EXPECTED_VERSION:-${GITHUB_REF_NAME:-}}
+expected_version=${expected_version#v}
+if [ -z "$expected_version" ]; then
+  echo_stderr "EXPECTED_VERSION or GITHUB_REF_NAME is required."
+  exit 1
+fi
+
+tarballs=("$dir"/*.tgz)
+if [ ! -e "${tarballs[0]}" ]; then
+  echo_stderr "No npm tarballs found in $dir."
+  exit 1
+fi
+
+function manifest {
+  tar -xOzf "$1" package/package.json
+}
+
+function in_scopes {
+  local scope
+  for scope in $scopes; do
+    [[ "$1" == "${scope%/}/"* ]] && return 0
+  done
+  return 1
+}
+
+declare -A bundled=()
+for tgz in "${tarballs[@]}"; do
+  pkg_json=$(manifest "$tgz")
+  name=$(jq -r .name <<<"$pkg_json")
+  version=$(jq -r .version <<<"$pkg_json")
+  if ! in_scopes "$name"; then
+    echo_stderr "Refusing to publish $name from $(basename "$tgz"): it is outside $scopes."
+    exit 1
+  fi
+  if [ "$version" != "$expected_version" ]; then
+    echo_stderr "Refusing $name@$version: this release publishes only version $expected_version."
+    exit 1
+  fi
+  bundled[$name]=1
+done
+
+# npmjs holds an accepted upload as "staged" for several minutes before the version goes live, and
+# `npm view` does not see it meanwhile. A publish that died after the upload leaves a version the
+# retry cannot detect and cannot publish over; it goes live on its own with the tag it was given.
+staged_error='Cannot publish over previously staged version'
+
+function publish_one {
+  local tgz=$1 name version tag current publish_tag out
+  name=$(manifest "$tgz" | jq -r .name)
+  version=$(manifest "$tgz" | jq -r .version)
+  tag=$(npm_dist_tag "$version")
+  current=$(npm view "$name" "dist-tags.$tag" 2>/dev/null || true)
+
+  if [ -n "$current" ] && [ "$current" != "$version" ] &&
+     [ "$(semver sort "$current" "$version" | tail -1)" != "$version" ]; then
+    echo "$name@$version is older than its $tag ($current); publishing it without moving $tag."
+    # npm attaches a dist-tag to every publish, so this takes one that nothing reads, and that must
+    # not parse as a semver range.
+    publish_tag=tmp-publish
+  else
+    publish_tag=$tag
+  fi
+
+  echo_header "publishing $name@$version ($publish_tag)"
+  if [ "$dry_run" -eq 1 ]; then
+    npm publish "$tgz" --ignore-scripts --dry-run --tag "$publish_tag" --access public
+    return
+  fi
+  if npm view "$name@$version" version >/dev/null 2>&1; then
+    # A re-run. Trusted publishing authorizes only `npm publish` (moving a dist-tag needs classic
+    # auth), so a tag left behind by a partial release is reported for a manual repair.
+    if [ "$publish_tag" != "$tag" ] || [ "$current" = "$version" ]; then
+      echo "$name@$version is already published."
+    else
+      echo "$name@$version is already published, but $tag points at '${current:-nothing}'."
+      echo "To move it (needs npm auth): npm dist-tag add $name@$version $tag"
+    fi
+    return
+  fi
+  out=$(mktemp)
+  if ! retry "npm publish \"$tgz\" --ignore-scripts --tag \"$publish_tag\" --access public --provenance 2>&1 | tee $out; exit \${PIPESTATUS[0]}"; then
+    grep -q "$staged_error" "$out" || exit 1
+    echo "$name@$version is already staged by an earlier publish and will go live on its own."
+  fi
+  rm -f "$out"
+}
+
+# Each package goes out after every bundled package it depends on: npm silently drops an optional
+# dependency it cannot resolve, and installs of a dependent fail until its dependencies appear.
+declare -A tgz_of=() deps_of=() done_pkgs=()
+for tgz in "${tarballs[@]}"; do
+  name=$(manifest "$tgz" | jq -r .name)
+  tgz_of[$name]=$tgz
+  deps_of[$name]=$(manifest "$tgz" | jq -r '[.dependencies//{}, .optionalDependencies//{}, .peerDependencies//{}] | add | keys[]')
+done
+remaining=${#tgz_of[@]}
+while [ "$remaining" -gt 0 ]; do
+  progressed=0
+  for name in $(printf '%s\n' "${!tgz_of[@]}" | sort); do
+    [ -n "${done_pkgs[$name]:-}" ] && continue
+    ready=1
+    for dep in ${deps_of[$name]}; do
+      if [ -n "${bundled[$dep]:-}" ] && [ "$dep" != "$name" ] && [ -z "${done_pkgs[$dep]:-}" ]; then
+        ready=0
+        break
+      fi
+    done
+    [ "$ready" -eq 1 ] || continue
+    publish_one "${tgz_of[$name]}"
+    done_pkgs[$name]=1
+    remaining=$((remaining - 1))
+    progressed=1
+  done
+  if [ "$progressed" -eq 0 ]; then
+    echo_stderr "Dependency cycle among: $(for n in "${!tgz_of[@]}"; do [ -z "${done_pkgs[$n]:-}" ] && echo -n "$n "; done)"
+    exit 1
+  fi
+done

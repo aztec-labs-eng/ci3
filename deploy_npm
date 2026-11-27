@@ -5,15 +5,7 @@ version=$1
 
 dry_run=${DRY_RUN:-0}
 
-# A stable release takes 'latest', the rc channel takes 'prerelease', and every other channel takes
-# a dist-tag named after itself ('nightly', 'commit', ...), so each tag follows exactly one channel.
-prerelease=$(semver prerelease $version)
-channel=${prerelease%%.*}
-case "$channel" in
-  "") npm_tag="latest" ;;
-  rc) npm_tag="prerelease" ;;
-  *) npm_tag="$channel" ;;
-esac
+npm_tag=$(npm_dist_tag $version)
 
 # Route our scopes at NPM_REGISTRY and authenticate with whatever credential the environment set.
 source $ci3/source_npm_auth
