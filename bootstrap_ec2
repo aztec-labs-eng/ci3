@@ -389,6 +389,7 @@ start_build() {
     -e NO_CACHE=${NO_CACHE:-} \
     -e NO_CACHE_UPLOAD=${NO_CACHE_UPLOAD:-} \
     -e CI3_CACHE_BUCKET=$(cache_bucket) \
+    -e CI3_INSTANCE_PROFILE_NAME=${CI3_INSTANCE_PROFILE_NAME:-} \
     -e NO_FAIL_FAST=${NO_FAIL_FAST:-} \
     -e CI_REDIS='ci-redis-tiered.lzka0i.ng.0001.use2.cache.amazonaws.com' \
     -e SSH_CONNECTION=' ' \
