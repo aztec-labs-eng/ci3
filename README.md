@@ -47,10 +47,11 @@ Tools are provided for the following themes.
 1. **Caching**
    - **`cache_content_hash`**: Takes file patterns (or `.rebuild_patterns`) to compute a stable content hash.
    - **`cache_upload`, `cache_download`**: Upload/download `.tar.gz` artifacts from a remote S3-like cache.
-     The shared cache (`s3://aztec-ci-artifacts/build-cache`) is publicly readable and written by every CI build.
-     A build that must not use it, such as a release or a build of code that is not public, sources
-     `source_cache_bucket <bucket>` (or sets `CI3_CACHE_BUCKET`) to point the cache scripts at a private
-     bucket that only its own build instances can write; the repository picks the bucket.
+     The cache follows the instance profile (`CI3_INSTANCE_PROFILE_NAME`), since each profile can write only
+     its own trust level's cache: the shared, publicly readable `aztec-ci-artifacts` for ordinary builds
+     and local runs, `aztec-ci-release-cache` for release instances, `aztec-ci-private-cache` for private
+     ones. A job with no instance profile that needs another level's cache, such as a release's publish
+     job, names it with `source_cache_bucket <bucket>` (or `CI3_CACHE_BUCKET`).
    - **`cache_upload_flag`, `cache_download_flag`**: Mark or detect a particular test's success state. Avoids re-running long tests.
 
 2. **Test Parallelization & Caching**

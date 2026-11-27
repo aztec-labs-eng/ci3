@@ -82,12 +82,29 @@ function ci_term_link {
 # The repository ci3 is running for, as "<org>/<repo>". GITHUB_REPOSITORY is set by CI;
 # outside it, fall back to origin's url so links and names still point at the right repo.
 # ci3 is shared by several repositories, so nothing may hardcode one.
-# The build cache cache_* read and write: s3://<bucket>/build-cache/<name>. By default the shared
-# cache every CI build instance writes, which is also public: served over plain HTTP and through
-# build-cache.aztec-labs.com. CI3_CACHE_BUCKET names another (see source_cache_bucket), which is
-# private, so it is read only through authenticated S3, never the public endpoints.
+# The build cache cache_* read and write: s3://<bucket>/build-cache/<name>. It follows the trust level
+# of the instance profile (CI3_INSTANCE_PROFILE_NAME), since each profile can write only its own
+# level's cache:
+#   build-instance, or no profile (a local run, a GitHub runner): aztec-ci-artifacts, the shared cache,
+#     which every CI build writes and which is public: served over plain HTTP and through
+#     build-cache.aztec-labs.com;
+#   release-build-instance: aztec-ci-release-cache, so a release never publishes what another build put
+#     in the shared cache under its content hashes;
+#   private-build-instance, private-release-build-instance: aztec-ci-private-cache, so code that is not
+#     public never reaches the shared cache.
+# CI3_CACHE_BUCKET overrides it (see source_cache_bucket), for a job with no instance profile such as a
+# release's publish job. Any bucket but the shared one is private, so it is read only through
+# authenticated S3, never the public endpoints.
 function cache_bucket {
-  echo "${CI3_CACHE_BUCKET:-aztec-ci-artifacts}"
+  if [ -n "${CI3_CACHE_BUCKET:-}" ]; then
+    echo "$CI3_CACHE_BUCKET"
+    return
+  fi
+  case "$(instance_group "${CI3_INSTANCE_PROFILE_NAME:-ci3-build-instance-profile}")" in
+    release-build-instance) echo aztec-ci-release-cache ;;
+    private-build-instance | private-release-build-instance) echo aztec-ci-private-cache ;;
+    *) echo aztec-ci-artifacts ;;
+  esac
 }
 
 function cache_s3_uri {
