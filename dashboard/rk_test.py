@@ -4,7 +4,6 @@
   python3 rk_test.py
 """
 import base64
-import gzip
 import unittest
 from unittest import mock
 
@@ -96,32 +95,6 @@ class BenchListingTest(unittest.TestCase):
     def test_no_series_adds_nothing(self):
         with mock.patch.object(rk, 'list_bench_dashboards', lambda: []):
             self.assertEqual(rk.bench_listing(), '')
-
-
-class ReadFromS3Test(unittest.TestCase):
-    """A log missing from the public bucket is read from the private one."""
-
-    def fake_s3(self, objects):
-        from botocore.exceptions import ClientError
-
-        class FakeS3:
-            def get_object(self, Bucket, Key):
-                if (Bucket, Key) in objects:
-                    return {'Body': mock.Mock(read=lambda: gzip.compress(objects[(Bucket, Key)].encode()))}
-                # Without ListBucket, S3 answers a missing key with AccessDenied.
-                code = 'AccessDenied' if Bucket == rk.S3_PRIVATE_LOGS_BUCKET else 'NoSuchKey'
-                raise ClientError({'Error': {'Code': code}}, 'GetObject')
-        return FakeS3()
-
-    def test_public_then_private(self):
-        objects = {
-            (rk.S3_LOGS_BUCKET, 'logs/abcd/abcdef.log.gz'): 'public log',
-            (rk.S3_PRIVATE_LOGS_BUCKET, 'logs/1234/123456.log.gz'): 'private log',
-        }
-        with mock.patch.object(rk, '_s3', self.fake_s3(objects)):
-            self.assertEqual(rk.read_from_s3('abcdef'), 'public log')
-            self.assertEqual(rk.read_from_s3('123456'), 'private log')
-            self.assertIsNone(rk.read_from_s3('ffffff'))
 
 
 if __name__ == '__main__':

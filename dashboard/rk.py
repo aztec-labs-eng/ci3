@@ -23,9 +23,6 @@ from rk_core import (
     LINK_OPEN, hyperlink, r, get_section_data, get_list_as_string
 )
 S3_LOGS_BUCKET = os.getenv('S3_LOGS_BUCKET', 'aztec-ci-artifacts')
-# Builds of code that is not public log to their own private bucket (CI_LOGS_S3_LOCATION), under the
-# same prefix; a log missing from the public bucket is looked for there.
-S3_PRIVATE_LOGS_BUCKET = os.getenv('S3_PRIVATE_LOGS_BUCKET', 'aztec-ci-private-cache')
 S3_LOGS_PREFIX = os.getenv('S3_LOGS_PREFIX', 'logs')
 
 _s3 = boto3.client('s3', region_name='us-east-2', config=Config(connect_timeout=10, read_timeout=60, retries={'max_attempts': 3}))
@@ -42,18 +39,16 @@ def require_auth(f):
 
 def read_from_s3(key):
     """Read log from S3 (fallback when Redis and disk both miss)."""
-    s3_key = f"{S3_LOGS_PREFIX}/{key[:4]}/{key}.log.gz"
-    for bucket in filter(None, (S3_LOGS_BUCKET, S3_PRIVATE_LOGS_BUCKET)):
-        try:
-            obj = _s3.get_object(Bucket=bucket, Key=s3_key)
-            return gzip.decompress(obj['Body'].read()).decode('utf-8', errors='replace')
-        except ClientError as e:
-            # The dashboard cannot list the private bucket, so a log missing there is AccessDenied.
-            missing = ('NoSuchKey', 'AccessDenied') if bucket == S3_PRIVATE_LOGS_BUCKET else ('NoSuchKey',)
-            if e.response['Error']['Code'] not in missing:
-                print(f"S3 error reading {key} from {bucket}: {e}")
-        except Exception as e:
-            print(f"Error reading {key} from S3 bucket {bucket}: {e}")
+    try:
+        prefix = key[:4]
+        s3_key = f"{S3_LOGS_PREFIX}/{prefix}/{key}.log.gz"
+        obj = _s3.get_object(Bucket=S3_LOGS_BUCKET, Key=s3_key)
+        return gzip.decompress(obj['Body'].read()).decode('utf-8', errors='replace')
+    except ClientError as e:
+        if e.response['Error']['Code'] != 'NoSuchKey':
+            print(f"S3 error reading {key}: {e}")
+    except Exception as e:
+        print(f"Error reading from S3: {e}")
     return None
 
 def read_breakdown_from_s3(runtime, flow_name, sha):
