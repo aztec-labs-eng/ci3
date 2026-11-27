@@ -174,21 +174,6 @@ iid=$(cat "$state_dir/iid" | tr -d '\n\r' | xargs)
 export EC2_INSTANCE_TYPE=$(cat "$state_dir/instance_type" 2>/dev/null || echo "unknown")
 export EC2_SPOT=$(cat "$state_dir/spot" 2>/dev/null || echo "unknown")
 
-# --- Credential encoding ---
-# Encode GCP and network env files as base64 for transfer to the instance.
-export GOOGLE_APPLICATION_CREDENTIALS=${GOOGLE_APPLICATION_CREDENTIALS:-/tmp/gcp-key.json}
-export NETWORK_ENV_FILE=${NETWORK_ENV_FILE:-/tmp/network.env}
-if [ -f "${GOOGLE_APPLICATION_CREDENTIALS}" ]; then
-  export GCP_HELM_SA_KEY_B64=$(cat "${GOOGLE_APPLICATION_CREDENTIALS}" | base64 -w 0)
-fi
-if [ -f "${NETWORK_ENV_FILE}" ]; then
-  export NETWORK_ENV_FILE_B64=$(cat "${NETWORK_ENV_FILE}" | base64 -w 0)
-fi
-# The aztec-nr mirror deploy key arrives as the secret's contents and reaches the build as a file.
-if [ -n "${AZTEC_NR_GITHUB_MIRROR_DEPLOY_KEY:-}" ]; then
-  export AZTEC_NR_GITHUB_MIRROR_DEPLOY_KEY_B64=$(base64 -w 0 <<<"$AZTEC_NR_GITHUB_MIRROR_DEPLOY_KEY")
-fi
-
 run_cmd="PARENT_LOG_ID=\$ci_log_id run 2>&1 | ci3/add_timestamps | DUP=1 ci3/cache_log 'CI run' \$ci_log_id"
 
 # --- Container script ---
@@ -215,21 +200,18 @@ container_script=$(
   # ci3 is a submodule and the shallow fetch above does not bring it: init it before
   # anything sources it.
   git submodule update --init --depth 1 ci3
-  # Commits the private patch before ci3/source derives COMMIT_HASH from HEAD. Its output is replayed
-  # in run: ci3/internal/ssm_send_command shows only stderr, and only on failure.
-  private_release_patch_log=
-  if [ "\${RELEASE_TARGET:-}" = private ]; then
-    private_release_patch_log=\$(ci3/internal/apply_private_release_patch)
+  # The repository's own post-checkout step, such as applying a patch to the tree, runs before
+  # ci3/source derives COMMIT_HASH from HEAD. Its output is replayed in run:
+  # ci3/internal/ssm_send_command shows only stderr, and only on failure.
+  post_checkout_log=
+  if [ -x .github/ci3_post_checkout.sh ]; then
+    post_checkout_log=\$(.github/ci3_post_checkout.sh)
   fi
   source ci3/source
   ci_log_id=\$CI_LOG_ID
   log_ci_run \$ci_log_id
 
-  # A release forwards its docker credential but not its registry: the public URLs are defaults in
-  # ci3/source_release_target, which the build sources later. Source it here too, so this login
-  # knows where it is logging in; it is idempotent and only reached when there is a credential.
-  if [ -n "\$DOCKER_PASSWORD" ]; then
-    source \$ci3/source_release_target
+  if [ -n "\${DOCKER_PASSWORD:-}" ]; then
     docker_login
   fi
 
@@ -241,7 +223,7 @@ container_script=$(
     if semver check "\$REF_NAME"; then
       echo "Performing a release because \$REF_NAME is a semver."
     fi
-    [ -z "\$private_release_patch_log" ] || echo "\$private_release_patch_log"
+    [ -z "\$post_checkout_log" ] || echo "\$post_checkout_log"
 
     # Background monitors. cache_log and add_timestamps both close inherited pipeline
     # fds internally, so these long-running processes won't block the outer pipeline.
@@ -278,15 +260,36 @@ EOF
 
 # --- Host script ---
 # This runs on the EC2 host, via SSM.
-# CI3_PASS_ENV names further variables to pass from here into the build container, space-separated, for a consuming
-# repo's own credentials (a token for a private submodule, say). Each is quoted for the host's shell.
-pass_env_args=""
-for pass_env_name in ${CI3_PASS_ENV:-}; do
-  if [[ ! "$pass_env_name" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
-    echo_stderr "CI3_PASS_ENV: not a variable name: $pass_env_name"
+# The consuming repository says what else reaches the build container, both space-separated lists of
+# variable names, usually set in its CI entry point:
+#   CI3_PASS_ENV    variables passed as they are (the repository's own tokens and settings). Each is
+#                   quoted for the host's shell.
+#   CI3_PASS_FILES  variables holding the path of a file on this machine (a service account key, an
+#                   env file). The file is copied to the instance under /tmp/ci3-files, which the
+#                   container shares, and the variable is passed pointing at the copy. One that is
+#                   unset or empty is skipped, as is one naming no file.
+function check_pass_name {
+  if [[ ! "$2" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+    echo_stderr "$1: not a variable name: $2"
     exit 1
   fi
+}
+pass_env_args=""
+for pass_env_name in ${CI3_PASS_ENV:-}; do
+  check_pass_name CI3_PASS_ENV "$pass_env_name"
   pass_env_args+=" -e $pass_env_name=$(printf %q "${!pass_env_name:-}")"
+done
+pass_files_script=""
+for pass_file_name in ${CI3_PASS_FILES:-}; do
+  check_pass_name CI3_PASS_FILES "$pass_file_name"
+  pass_file=${!pass_file_name:-}
+  [ -n "$pass_file" ] || continue
+  if [ ! -f "$pass_file" ]; then
+    echo_stderr "CI3_PASS_FILES: $pass_file_name=$pass_file is not a file; not passing it."
+    continue
+  fi
+  pass_files_script+="base64 -d > /tmp/ci3-files/$pass_file_name <<<'$(base64 -w 0 "$pass_file")'"$'\n'
+  pass_env_args+=" -e $pass_file_name=/tmp/ci3-files/$pass_file_name"
 done
 
 host_script=$(
@@ -351,25 +354,9 @@ echo "HOST: fetching EC2 metadata token..."
 aws_token=\$(curl -sX PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 21600')
 echo "HOST: metadata token acquired."
 
-GOOGLE_APPLICATION_CREDENTIALS=\${GOOGLE_APPLICATION_CREDENTIALS:-/tmp/gcp-key.json}
-NETWORK_ENV_FILE=\${NETWORK_ENV_FILE:-/tmp/network.env}
-
-# Decode GCP service account key if provided (base64-encoded by the caller).
-echo "HOST: decoding credentials..."
-if [ -n "${GCP_HELM_SA_KEY_B64:-}" ]; then
-  echo "${GCP_HELM_SA_KEY_B64:-}" | base64 -d > "\${GOOGLE_APPLICATION_CREDENTIALS}"
-fi
-
-# Decode network env file if provided.
-if [ -n "${NETWORK_ENV_FILE_B64:-}" ]; then
-  echo "${NETWORK_ENV_FILE_B64:-}" | base64 -d > "\${NETWORK_ENV_FILE}"
-fi
-
-if [ -n "${AZTEC_NR_GITHUB_MIRROR_DEPLOY_KEY_B64:-}" ]; then
-  mkdir -p \$HOME/.ssh
-  echo "${AZTEC_NR_GITHUB_MIRROR_DEPLOY_KEY_B64:-}" | base64 -d > \$HOME/.ssh/aztec_nr_mirror_key
-  chmod 600 \$HOME/.ssh/aztec_nr_mirror_key
-fi
+echo "HOST: writing passed files..."
+(umask 077 && mkdir -p /tmp/ci3-files
+$pass_files_script)
 
 start_build() {
   echo "HOST: preparing devbox (uid/gid, docker run)..."
@@ -385,8 +372,6 @@ start_build() {
     -v \$HOME/.bb-crs:/home/aztec-dev/.bb-crs \
     -v /dev/kmsg:/dev/kmsg \
     -v /tmp:/tmp \
-    -e GOOGLE_APPLICATION_CREDENTIALS="\${GOOGLE_APPLICATION_CREDENTIALS}" \
-    -e NETWORK_ENV_FILE="\${NETWORK_ENV_FILE}" \
     -e CI=1 \
     -e CI_LOG_ID=${CI_LOG_ID:-} \
     -e CI_LOGS_S3_LOCATION=${CI_LOGS_S3_LOCATION:-s3://aztec-ci-artifacts/logs} \
@@ -399,41 +384,32 @@ start_build() {
     -e CI_DASHBOARD=${CI_DASHBOARD:-} \
     -e PARENT_LOG_ID=${PARENT_LOG_ID:-} \
     -e NO_CACHE=${NO_CACHE:-} \
+    -e NO_CACHE_UPLOAD=${NO_CACHE_UPLOAD:-} \
+    -e CI3_CACHE_BUCKET=${CI3_CACHE_BUCKET:-} \
     -e NO_FAIL_FAST=${NO_FAIL_FAST:-} \
     -e CI_REDIS='ci-redis-tiered.lzka0i.ng.0001.use2.cache.amazonaws.com' \
     -e SSH_CONNECTION=' ' \
     -e LOCAL_USER_ID=\$local_uid \
     -e LOCAL_GROUP_ID=\$local_gid \
-    -e GCP_PROJECT_ID=${GCP_PROJECT_ID:-} \
-    -e RELEASE_TARGET=${RELEASE_TARGET:-} \
     -e DOCKER_REGISTRY=${DOCKER_REGISTRY:-} \
     -e DOCKER_PASSWORD=${DOCKER_PASSWORD:-} \
     -e DOCKER_USERNAME=${DOCKER_USERNAME:-} \
-    -e R2_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID:-} \
-    -e R2_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY:-} \
     -e BUILD_SYSTEM_DEBUG=${BUILD_SYSTEM_DEBUG:-} \
     -e GITHUB_TOKEN=${GITHUB_TOKEN:-} \
     -e GITHUB_REPOSITORY=$github_repository \
     -e PR_NUMBER=${PR_NUMBER:-} \
     -e PR_HEAD_REF=${PR_HEAD_REF:-} \
     -e PR_BASE_REF=${PR_BASE_REF:-} \
-    -e CHONK_INPUTS_STATE_DIR=${CHONK_INPUTS_STATE_DIR:-} \
-    -e NETLIFY_SITE_ID=${NETLIFY_SITE_ID:-} \
-    -e NETLIFY_AUTH_TOKEN=${NETLIFY_AUTH_TOKEN:-} \
     -e NPM_REGISTRY=${NPM_REGISTRY:-} \
     -e NPM_TOKEN=${NPM_TOKEN:-} \
     -e NPM_USERNAME=${NPM_USERNAME:-} \
     -e NPM_PASSWORD=${NPM_PASSWORD:-} \
-    -e AZTEC_NR_GITHUB_MIRROR_DEPLOY_KEY_FILE=${AZTEC_NR_GITHUB_MIRROR_DEPLOY_KEY_B64:+/home/aztec-dev/.ssh/aztec_nr_mirror_key} \
     -e SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN:-} \
     -e AWS_TOKEN=\$aws_token \
-    -e NAMESPACE=${NAMESPACE:-} \
-    -e NETWORK=${NETWORK:-} \
     -e GITHUB_ACTOR=${GITHUB_ACTOR:-} \
     -e EC2_INSTANCE_TYPE=${EC2_INSTANCE_TYPE:-unknown} \
     -e EC2_SPOT=${EC2_SPOT:-unknown} \
     -e BENCH_UPLOAD=${BENCH_UPLOAD:-} \
-    -e AZTEC_TOOLCHAIN_DEFAULT_MAJOR_VERSION=${AZTEC_TOOLCHAIN_DEFAULT_MAJOR_VERSION:-} \
     -e DRY_RUN=${DRY_RUN:-} \
     --pids-limit=65536 \
     --shm-size=2g \

@@ -47,6 +47,10 @@ Tools are provided for the following themes.
 1. **Caching**
    - **`cache_content_hash`**: Takes file patterns (or `.rebuild_patterns`) to compute a stable content hash.
    - **`cache_upload`, `cache_download`**: Upload/download `.tar.gz` artifacts from a remote S3-like cache.
+     The shared cache (`s3://aztec-ci-artifacts/build-cache`) is publicly readable and written by every CI build.
+     A build that must not use it, such as a release or a build of code that is not public, sources
+     `source_cache_bucket <bucket>` (or sets `CI3_CACHE_BUCKET`) to point the cache scripts at a private
+     bucket that only its own build instances can write; the repository picks the bucket.
    - **`cache_upload_flag`, `cache_download_flag`**: Mark or detect a particular test's success state. Avoids re-running long tests.
 
 2. **Test Parallelization & Caching**
@@ -110,7 +114,7 @@ Entry points are sourced by path — `source $(git rev-parse --show-toplevel)/ci
 `source_bootstrap` from a `bootstrap.sh`, or the minimal `source_base` — which puts ci3 on `PATH`,
 so the rest is called by name: `denoise`, `cache_download`, `parallelize`, and so on. `source`
 already brings in redis, the ref name and the cache settings; those fragments are internal and
-never need sourcing separately. Only `source_npm_auth` and `source_release_target` are opt-in.
+never need sourcing separately. Only `source_npm_auth` and `source_cache_bucket` are opt-in.
 
 ### Internal
 
@@ -126,7 +130,10 @@ The dependency runs both ways. ci3 reads these from the repository it is buildin
 - `scripts/process_flake_log.py` — optional; run by `parallelize` after a test run when present.
 - `build-images/src/home/.gitconfig` — mounted into containers by `docker_isolate`.
 - `CI3_EVENT_ENDPOINT`, `CI3_EVENT_TOKEN` and `CI3_EVENT_PROJECT` — optional; when all are set, `bootstrap_ec2` sends a `ci.instance` event per build instance through `send_event` to that OTLP endpoint, for example `https://otel.aztec-labs.com`.
-- **Permission to renew a build instance's lease.** Each build instance shuts itself down, and so terminates, once its `LeaseUntil` tag has passed, and whoever launched it renews that tag every minute while it runs (`internal/source_instance_lease`). The AWS role that launches instances, in CI and on a build instance launching another (such as the benchmark box), needs `ec2:CreateTags` for the `LeaseUntil` key on instances tagged `Group=build-instance`. Without it, every instance shuts down 10 minutes after boot.
+- **Permission to renew a build instance's lease.** Each build instance shuts itself down, and so terminates, once its `LeaseUntil` tag has passed, and whoever launched it renews that tag every minute while it runs (`internal/source_instance_lease`). The AWS role that launches instances, in CI and on a build instance launching another (such as the benchmark box), needs `ec2:CreateTags` for the `LeaseUntil` key on instances tagged with its `Group`. Without it, every instance shuts down 10 minutes after boot.
+- **One `Group` per instance profile.** An instance's `Group` tag is its instance profile's name without the `ci3-` prefix and `-profile` suffix (`CI3_INSTANCE_PROFILE_NAME`, default `ci3-build-instance-profile`, so `build-instance`). Scope each launching role's EC2 and SSM permissions to the groups of the profiles it may pass, so a build of one trust level cannot drive instances of another.
+- **What reaches the build container.** `bootstrap_ec2` passes ci3's own settings. Anything else the repository's build needs it names, usually in its `ci.sh`: `CI3_PASS_ENV`, variables passed as they are; `CI3_PASS_FILES`, variables holding the path of a file on the runner, which is copied to the instance under `/tmp/ci3-files` and passed pointing at the copy.
+- `.github/ci3_post_checkout.sh` — optional; executable. Run on the instance right after checkout and before `ci3/source` derives `COMMIT_HASH`, with the build's environment and AWS role, so it can change the tree (apply and commit a patch, say). Its stdout is printed at the start of the run; its stderr shows only if it fails, which fails the run.
 - **`exec` into `bootstrap_ec2` or `bootstrap_ec2_multi`**, all the way from the CI step: `run: exec ./ci.sh fast` in the workflow, `exec bootstrap_ec2 …` in `ci.sh`. CI cancels a job by signalling only the process it started (GitHub Actions sends that one process SIGINT, then SIGTERM, then SIGKILL 10 seconds later), so that process must be the ci3 script that terminates the instances. A script in between that runs it without `exec`, including as part of a pipeline, keeps the signal to itself, and the instances run on until their leases run out. `tests/cancel_test` covers this.
 
 ### State shared between versions

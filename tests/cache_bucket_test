@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Tests a private cache bucket (source_cache_bucket, CI3_CACHE_BUCKET) against a throwaway LocalStack
+# S3: a build that selects one reads and writes only that bucket, never takes an object from the
+# shared cache, and reads its bucket only through authenticated S3. Run directly.
+CI3="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WORK=$(mktemp -d)
+container=release-cache-test-$$
+# ci3/source finds its root through git, so the commands run inside a repository, and stay there.
+git -C "$WORK" init -q
+git -C "$WORK" -c user.name=test -c user.email=test@example.com commit -q --allow-empty -m init
+export NO_CD=1
+
+cleanup() {
+  docker rm -f "$container" &>/dev/null || true
+  rm -rf "$WORK"
+}
+trap cleanup EXIT
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "PASS: $1"; }
+
+if ! docker info &>/dev/null; then
+  echo "SKIP: docker not available to run LocalStack"
+  exit 0
+fi
+
+docker run -d --name "$container" -e SERVICES=s3 -p 127.0.0.1::4566 localstack/localstack:4 > /dev/null
+port=$(docker port "$container" 4566/tcp | head -1 | sed 's/.*://')
+# AWS_ENDPOINT_URL rather than S3_BUILD_CACHE_AWS_PARAMS, so the scripts take their real path: the
+# shared cache over HTTP (curl), a private one through the AWS CLI.
+export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-east-1
+export AWS_ENDPOINT_URL=http://127.0.0.1:$port
+unset S3_BUILD_CACHE_AWS_PARAMS CI3_CACHE_BUCKET CACHE_LOCAL_DIR CACHE_SSH_HOST NO_CACHE NO_CACHE_UPLOAD
+for _ in $(seq 120); do
+  curl -sf "$AWS_ENDPOINT_URL/_localstack/health" > /dev/null && break
+  sleep 0.5
+done
+aws s3 mb s3://aztec-ci-artifacts > /dev/null
+aws s3 mb s3://aztec-ci-release-cache > /dev/null
+
+# A curl that records each URL and fails, so any read over HTTP shows up and never succeeds.
+mkdir -p "$WORK/bin"
+cat > "$WORK/bin/curl" <<EOF
+#!/usr/bin/env bash
+for a in "\$@"; do [[ "\$a" == http* ]] && echo "\$a" >> "$WORK/curl.log"; done
+exit 22
+EOF
+chmod +x "$WORK/bin/curl"
+
+has() { # bucket key
+  aws s3api head-object --bucket "$1" --key "build-cache/$2" &>/dev/null
+}
+tarball() { # name content -> uploads it to the shared cache, as any CI build could
+  mkdir -p "$WORK/src"
+  echo "$2" > "$WORK/src/out.txt"
+  tar -czf "$WORK/$1" -C "$WORK/src" out.txt
+  aws s3 cp "$WORK/$1" "s3://aztec-ci-artifacts/build-cache/$1" > /dev/null
+}
+# Runs a command as a build on a private bucket would: on CI, after sourcing source_cache_bucket.
+release() {
+  (cd "$WORK" && CI=1 PATH="$WORK/bin:$PATH" bash -c 'source "$0/source" && source "$0/source_cache_bucket" aztec-ci-release-cache && "${@}"' "$CI3" "$@")
+}
+
+# --- A release fails fast when its cache is not reachable ---
+if out=$(cd "$WORK" && CI=1 bash -c 'source "$0/source" && CI3_CACHE_BUCKET= && aws s3 rb s3://aztec-ci-release-cache >/dev/null && source "$0/source_cache_bucket" aztec-ci-release-cache; echo reached' "$CI3" 2>&1); then
+  fail "inaccessible: should exit (got: $out)"
+fi
+grep -q "cache s3://aztec-ci-release-cache is not accessible" <<< "$out" || fail "inaccessible: says why (got: $out)"
+grep -q reached <<< "$out" && fail "inaccessible: carried on"
+aws s3 mb s3://aztec-ci-release-cache > /dev/null
+pass "fails fast without access"
+
+# --- Uploads go to the release bucket only ---
+mkdir -p "$WORK/a" && echo built-by-release > "$WORK/a/out.txt"
+release bash -c 'cd "$1" && cache_upload rel.tar.gz out.txt' _ "$WORK/a" 2>/dev/null
+has aztec-ci-release-cache rel.tar.gz || fail "upload: not in the release bucket"
+has aztec-ci-artifacts rel.tar.gz && fail "upload: reached the shared cache"
+printf 'stream' | release cache_upload_stream rel.zst 2>/dev/null
+has aztec-ci-release-cache rel.zst || fail "upload_stream: not in the release bucket"
+has aztec-ci-artifacts rel.zst && fail "upload_stream: reached the shared cache"
+pass "uploads"
+
+# --- Downloads read the release bucket through S3, never over HTTP ---
+rm -f "$WORK/curl.log"
+mkdir -p "$WORK/out"
+release cache_download rel.tar.gz "$WORK/out" 2>/dev/null || fail "download: missed"
+[ "$(cat "$WORK/out/out.txt")" = built-by-release ] || fail "download: wrong content"
+[ "$(release cache_download_stream rel.zst 2>/dev/null)" = stream ] || fail "download_stream: wrong content"
+release cache_exists rel.tar.gz || fail "exists: missed"
+[ ! -s "$WORK/curl.log" ] || fail "read over HTTP: $(cat "$WORK/curl.log")"
+pass "downloads"
+
+# --- An object only the shared cache has is a miss, however it was put there ---
+tarball poisoned.tar.gz poisoned
+rm -rf "$WORK/out" && mkdir -p "$WORK/out"
+release cache_download poisoned.tar.gz "$WORK/out" 2>/dev/null && fail "poisoned: downloaded"
+[ -e "$WORK/out/out.txt" ] && fail "poisoned: extracted"
+release cache_exists poisoned.tar.gz && fail "poisoned: exists"
+pass "shared-cache objects are not used"
+
+# --- Nor does a local copy of a shared-cache object stand in for it ---
+mkdir -p "$WORK/local"
+cp "$WORK/poisoned.tar.gz" "$WORK/local/poisoned.tar.gz"
+rm -rf "$WORK/out" && mkdir -p "$WORK/out"
+CACHE_LOCAL_DIR="$WORK/local" release cache_download poisoned.tar.gz "$WORK/out" 2>/dev/null && fail "local: used the shared copy"
+CACHE_LOCAL_DIR="$WORK/local" release cache_download rel.tar.gz "$WORK/out" 2>/dev/null || fail "local: release object missed"
+[ -f "$WORK/local/aztec-ci-release-cache/rel.tar.gz" ] || fail "local: release object not kept under its bucket"
+pass "local cache"
+
+# --- Without a private bucket, nothing changes: the shared cache, read over HTTP ---
+rm -f "$WORK/curl.log"
+(cd "$WORK" && CI=1 PATH="$WORK/bin:$PATH" bash -c 'source "$0/source" && cache_download poisoned.tar.gz "$1"' "$CI3" "$WORK/out" 2>/dev/null) || true
+grep -qx "http://aztec-ci-artifacts.s3.amazonaws.com/build-cache/poisoned.tar.gz" "$WORK/curl.log" \
+  || fail "default: not read from the shared cache's HTTP endpoint ($(cat "$WORK/curl.log" 2>/dev/null))"
+pass "default bucket unchanged"

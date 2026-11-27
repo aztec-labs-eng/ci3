@@ -1,0 +1,23 @@
+# Points the build cache at a private bucket: `source $ci3/source_cache_bucket <bucket>`.
+#
+# The default build cache, aztec-ci-artifacts, is public (served over plain HTTP) and written by every
+# CI build instance, pull request builds included. Two kinds of build must not use it:
+#   - a public release, which would otherwise publish whatever an earlier build uploaded under its
+#     content hashes;
+#   - a build of code that is not public, whose artifacts anyone could then download.
+# Each uses a bucket only builds of its own kind can write, and that nothing serves publicly. Which
+# bucket that is belongs to the repository. The cache scripts read and write it through authenticated
+# S3, and keep it in a directory of its own under CACHE_LOCAL_DIR.
+#
+# Logs are separate: CI_LOGS_S3_LOCATION says where a build's logs go.
+
+export CI3_CACHE_BUCKET=${1:?usage: source \$ci3/source_cache_bucket <bucket>}
+
+# On CI, a build that cannot reach its cache is misconfigured: it would rebuild everything, and a
+# release would then fail to hand its outputs to its publish step. Fail now rather than after the
+# build. HeadBucket needs s3:ListBucket, which every identity that uses such a bucket is granted.
+if [ "${CI:-0}" -eq 1 ] && ! aws ${S3_BUILD_CACHE_AWS_PARAMS:-} s3api head-bucket --bucket "$CI3_CACHE_BUCKET" &>/dev/null; then
+  echo_stderr "The cache s3://$CI3_CACHE_BUCKET is not accessible: this build is not running with the AWS role" \
+    "and instance profile that can use it."
+  exit 1
+fi

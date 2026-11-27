@@ -28,8 +28,8 @@ else
 fi
 
 function download_from_remote {
-  if [[ -n "${S3_BUILD_CACHE_AWS_PARAMS:-}" ]]; then
-    aws $S3_BUILD_CACHE_AWS_PARAMS s3 cp "s3://aztec-ci-artifacts/build-cache/$name" - 2>/dev/null
+  if [[ -n "${S3_BUILD_CACHE_AWS_PARAMS:-}" ]] || ! cache_is_public; then
+    aws ${S3_BUILD_CACHE_AWS_PARAMS:-} s3 cp "$(cache_s3_uri "$name")" - 2>/dev/null
   elif [[ -n "${CACHE_SSH_HOST:-}" ]]; then
     ssh "$CACHE_SSH_HOST" "curl -s -f \"$endpoint/$name\""
   else
@@ -37,9 +37,9 @@ function download_from_remote {
   fi
 }
 
-if [[ -n "${CACHE_LOCAL_DIR:-}" ]] && [[ -f "$CACHE_LOCAL_DIR/$name" ]]; then
+if [[ -n "${CACHE_LOCAL_DIR:-}" ]] && [[ -f "$(cache_local_dir)/$name" ]]; then
   echo_stderr "Local cache hit for $name."
-  zstd -d < "$CACHE_LOCAL_DIR/$name"
+  zstd -d < "$(cache_local_dir)/$name"
   exit 0
 fi
 

@@ -33,11 +33,11 @@ if ! aws configure export-credentials &>/dev/null; then
   skip "Skipping upload, no AWS credentials found."
 fi
 if [ -z "${S3_FORCE_UPLOAD:-}" ] && \
-  aws ${S3_BUILD_CACHE_AWS_PARAMS:-} s3 ls "s3://aztec-ci-artifacts/build-cache/$name" &>/dev/null; then
+  aws ${S3_BUILD_CACHE_AWS_PARAMS:-} s3 ls "$(cache_s3_uri "$name")" &>/dev/null; then
   skip "Skipping upload, already exists: $name"
 fi
 
-if zstd -T0 | aws ${S3_BUILD_CACHE_AWS_PARAMS:-} s3 cp - "s3://aztec-ci-artifacts/build-cache/$name" &>/dev/null; then
+if zstd -T0 | aws ${S3_BUILD_CACHE_AWS_PARAMS:-} s3 cp - "$(cache_s3_uri "$name")" &>/dev/null; then
   echo_stderr "Cache upload of $name complete in ${SECONDS}s."
 else
   echo_stderr "Cache upload of $name failed."
