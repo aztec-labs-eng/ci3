@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Prints the npm dist-tag a version publishes under: a stable release takes 'latest', the rc channel
+# takes 'prerelease', and every other channel takes a dist-tag named after itself ('nightly',
+# 'commit', ...), so each tag follows exactly one channel.
+#   usage: npm_dist_tag <version>
+NO_CD=1 source $(dirname "${BASH_SOURCE[0]}")/source
+
+prerelease=$(semver prerelease "${1:?usage: npm_dist_tag <version>}")
+channel=${prerelease%%.*}
+case "$channel" in
+  "") echo latest ;;
+  rc) echo prerelease ;;
+  *) echo "$channel" ;;
+esac

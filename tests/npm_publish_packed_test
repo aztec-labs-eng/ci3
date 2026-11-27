@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# npm_publish_packed against a fake npm: dependency order, dist-tags, re-runs, staged versions, and the
+# scope and version checks.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CI3="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+failures=0
+pass() { echo "✓ $1"; }
+fail() {
+  echo "✗ $1: $2"
+  failures=$((failures + 1))
+}
+expect() {
+  if [ "$2" == "$3" ]; then pass "$1"; else fail "$1" "expected '$3', got '$2'"; fi
+}
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+# The fake registry: $work/registry/tags/<name>/<tag> holds a dist-tag's version,
+# $work/registry/published lists name@version, $work/registry/staged lists name@version that answers
+# a publish with the staged-version error. Every publish is appended to $work/publishes.
+mkdir -p $work/bin $work/registry/tags
+touch $work/registry/published $work/registry/staged $work/publishes
+cat >$work/bin/npm <<'EOF'
+#!/usr/bin/env bash
+reg=$FAKE_REGISTRY
+case "$1" in
+  view)
+    if [[ "$3" == dist-tags.* ]]; then
+      f="$reg/tags/$2/${3#dist-tags.}"
+      [ -f "$f" ] && cat "$f"
+      exit 0
+    fi
+    grep -qxF "$2" "$reg/published" && echo "${2##*@}" && exit 0
+    exit 1 ;;
+  publish)
+    tgz=$2; shift 2
+    m=$(tar -xOzf "$tgz" package/package.json)
+    id="$(jq -r .name <<<"$m")@$(jq -r .version <<<"$m")"
+    tag=$(sed -n 's/.*--tag \([^ ]*\).*/\1/p' <<<"$*")
+    if grep -qxF "$id" "$reg/staged"; then
+      echo "npm error code E409 Cannot publish over previously staged version $id" >&2
+      exit 1
+    fi
+    dry=; [[ " $* " == *" --dry-run "* ]] && dry=" dry-run"
+    prov=; [[ " $* " == *" --provenance "* ]] && prov=" provenance"
+    echo "$id $tag$dry$prov" >>"$FAKE_PUBLISHES"
+    exit 0 ;;
+esac
+exit 2
+EOF
+chmod +x $work/bin/npm
+
+# <name> <version> [deps json]: packs a tarball into $work/dist.
+function pkg {
+  local d=$work/src/$1
+  mkdir -p $d/package
+  jq -n --arg n "$1" --arg v "$2" --argjson deps "${3:-{\}}" '{name: $n, version: $v, dependencies: $deps}' >$d/package/package.json
+  mkdir -p $work/dist
+  tar -czf "$work/dist/$(tr -d @ <<<"$1" | tr / -)-$2.tgz" -C $d package
+}
+
+function run {
+  (env -u GITHUB_REF_NAME PATH=$work/bin:$PATH FAKE_REGISTRY=$work/registry FAKE_PUBLISHES=$work/publishes \
+    NPM_PUBLISH_SCOPES="@ex @ex-labs" RETRY_ATTEMPTS=1 RETRY_SLEEP=0 "$@" $CI3/npm_publish_packed $work/dist >$work/log 2>&1)
+}
+function reset {
+  rm -rf $work/dist $work/src $work/registry/tags/*
+  : >$work/publishes
+  : >$work/registry/published
+  : >$work/registry/staged
+}
+
+# A chain c -> b -> a (c depends on b, b on a), plus d with no bundled dependency.
+v=2.0.0
+pkg @ex/a $v '{"left-pad":"1.0.0"}'
+pkg @ex/b $v '{"@ex/a":"2.0.0"}'
+pkg @ex-labs/c $v '{"@ex/b":"2.0.0"}'
+pkg @ex/d $v
+if run env EXPECTED_VERSION=$v; then
+  order=$(cut -d' ' -f1 $work/publishes | tr '\n' ' ')
+  expect "dependencies publish first, through a chain" "$order" "@ex/a@2.0.0 @ex/b@2.0.0 @ex/d@2.0.0 @ex-labs/c@2.0.0 "
+  expect "stable takes latest, with provenance" "$(head -1 $work/publishes)" "@ex/a@2.0.0 latest provenance"
+else
+  fail "publish" "$(tail -5 $work/log)"
+fi
+
+reset
+pkg @ex/a 3.0.0-rc.1
+if run env GITHUB_REF_NAME=v3.0.0-rc.1; then
+  expect "rc takes prerelease; version from the tag name" "$(cat $work/publishes)" "@ex/a@3.0.0-rc.1 prerelease provenance"
+else
+  fail "rc publish" "$(tail -5 $work/log)"
+fi
+
+reset
+pkg @ex/a 1.5.0
+mkdir -p $work/registry/tags/@ex/a && echo 2.0.0 >$work/registry/tags/@ex/a/latest
+if run env EXPECTED_VERSION=1.5.0; then
+  expect "an older version leaves latest where it is" "$(cat $work/publishes)" "@ex/a@1.5.0 tmp-publish provenance"
+else
+  fail "older publish" "$(tail -5 $work/log)"
+fi
+
+reset
+pkg @ex/a 2.0.0
+pkg @ex/b 2.0.0
+echo @ex/a@2.0.0 >$work/registry/published
+mkdir -p $work/registry/tags/@ex/a && echo 1.0.0 >$work/registry/tags/@ex/a/latest
+if run env EXPECTED_VERSION=2.0.0; then
+  expect "a re-run skips what is out and publishes the rest" "$(cat $work/publishes)" "@ex/b@2.0.0 latest provenance"
+  grep -q "npm dist-tag add @ex/a@2.0.0 latest" $work/log && pass "a stale tag is reported" || fail "stale tag" "not reported: $(cat $work/log)"
+else
+  fail "re-run" "$(tail -5 $work/log)"
+fi
+
+reset
+pkg @ex/a 2.0.0
+echo @ex/a@2.0.0 >$work/registry/staged
+run env EXPECTED_VERSION=2.0.0 && pass "a staged version counts as published" || fail "staged" "$(tail -5 $work/log)"
+
+reset
+pkg @ex/a 2.0.0
+pkg @ex/b 2.0.0
+if run env EXPECTED_VERSION=2.0.0 DRY_RUN=1; then
+  expect "dry run publishes nothing for real" "$(cut -d' ' -f3 $work/publishes | sort -u)" "dry-run"
+else
+  fail "dry run" "$(tail -5 $work/log)"
+fi
+
+reset
+pkg @ex/a 2.0.0
+pkg @other/x 2.0.0
+run env EXPECTED_VERSION=2.0.0 && fail "scope" "published a package outside the scopes" || {
+  expect "a package outside the scopes is refused before anything publishes" "$(cat $work/publishes)" ""
+}
+
+reset
+pkg @ex/a 2.0.0
+pkg @ex/b 2.0.1
+run env EXPECTED_VERSION=2.0.0 && fail "version" "published a mismatched version" || {
+  expect "a mismatched version is refused before anything publishes" "$(cat $work/publishes)" ""
+}
+
+reset
+pkg @ex/a 2.0.0 '{"@ex/b":"2.0.0"}'
+pkg @ex/b 2.0.0 '{"@ex/a":"2.0.0"}'
+run env EXPECTED_VERSION=2.0.0 && fail "cycle" "a dependency cycle published" || {
+  grep -q "Dependency cycle" $work/log && pass "a dependency cycle is refused" || fail "cycle" "$(tail -3 $work/log)"
+}
+
+[ "$failures" -eq 0 ] || exit 1
