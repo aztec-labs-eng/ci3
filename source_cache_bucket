@@ -1,13 +1,11 @@
-# Points the build cache at a private bucket: `source $ci3/source_cache_bucket <bucket>`.
+# Points the build cache at a given bucket, and on CI checks it is reachable:
+# `source $ci3/source_cache_bucket <bucket>`.
 #
-# The default build cache, aztec-ci-artifacts, is public (served over plain HTTP) and written by every
-# CI build instance, pull request builds included. Two kinds of build must not use it:
-#   - a public release, which would otherwise publish whatever an earlier build uploaded under its
-#     content hashes;
-#   - a build of code that is not public, whose artifacts anyone could then download.
-# Each uses a bucket only builds of its own kind can write, and that nothing serves publicly. Which
-# bucket that is belongs to the repository. The cache scripts read and write it through authenticated
-# S3, and keep it in a directory of its own under CACHE_LOCAL_DIR.
+# A build on a CI instance needs no call: its cache follows its instance profile (cache_bucket in
+# internal/source_stdlib), and bootstrap_ec2 checks it. This is for a job with no instance profile that
+# must use another level's cache, such as a release's publish job on a GitHub runner reading the
+# bundle its release build left in the release cache. The cache scripts read and write any bucket but
+# the shared one through authenticated S3, and keep it in a directory of its own under CACHE_LOCAL_DIR.
 #
 # Logs are separate: CI_LOGS_S3_LOCATION says where a build's logs go.
 

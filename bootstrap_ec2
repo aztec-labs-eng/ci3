@@ -208,6 +208,9 @@ container_script=$(
     post_checkout_log=\$(.github/ci3_post_checkout.sh)
   fi
   source ci3/source
+  # A private cache this instance cannot reach means the wrong instance profile: fail now, not after a
+  # build that cached nothing.
+  cache_is_public || source ci3/source_cache_bucket "\$(cache_bucket)"
   ci_log_id=\$CI_LOG_ID
   log_ci_run \$ci_log_id
 
@@ -385,7 +388,7 @@ start_build() {
     -e PARENT_LOG_ID=${PARENT_LOG_ID:-} \
     -e NO_CACHE=${NO_CACHE:-} \
     -e NO_CACHE_UPLOAD=${NO_CACHE_UPLOAD:-} \
-    -e CI3_CACHE_BUCKET=${CI3_CACHE_BUCKET:-} \
+    -e CI3_CACHE_BUCKET=$(cache_bucket) \
     -e NO_FAIL_FAST=${NO_FAIL_FAST:-} \
     -e CI_REDIS='ci-redis-tiered.lzka0i.ng.0001.use2.cache.amazonaws.com' \
     -e SSH_CONNECTION=' ' \

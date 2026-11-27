@@ -18,4 +18,24 @@ for pair in \
     failures=$((failures + 1))
   fi
 done
+
+# cache_bucket: with no CI3_CACHE_BUCKET, the cache follows the instance profile, since each profile can
+# write only its own trust level's cache. No profile (a local run, a GitHub runner) is the shared cache.
+check_bucket() {
+  local profile=$1 explicit=$2 expected=$3 actual
+  actual=$(CI3_INSTANCE_PROFILE_NAME=$profile CI3_CACHE_BUCKET=$explicit cache_bucket)
+  if [ "$actual" == "$expected" ]; then
+    echo "ok: cache_bucket profile=${profile:-none} CI3_CACHE_BUCKET=${explicit:-unset}"
+  else
+    echo "FAIL: cache_bucket profile=${profile:-none} CI3_CACHE_BUCKET=${explicit:-unset}: expected $expected, got $actual"
+    failures=$((failures + 1))
+  fi
+}
+check_bucket "" "" aztec-ci-artifacts
+check_bucket ci3-build-instance-profile "" aztec-ci-artifacts
+check_bucket ci3-release-build-instance-profile "" aztec-ci-release-cache
+check_bucket ci3-private-build-instance-profile "" aztec-ci-private-cache
+check_bucket ci3-private-release-build-instance-profile "" aztec-ci-private-cache
+check_bucket ci3-release-build-instance-profile some-bucket some-bucket
+
 [ $failures -eq 0 ]
