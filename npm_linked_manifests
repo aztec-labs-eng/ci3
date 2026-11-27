@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# Prints, as cache_content_hash patterns, the manifests outside a package's own package.json that its
+# lockfile depends on, so a node_modules cache keyed on the lockfile misses when one of them changes:
+#   - its workspace members' package.json (yarn/npm "workspaces", or pnpm-workspace.yaml);
+#   - the package.json of every package it links in from the repository (portal:, link:, file:
+#     dependencies), followed through those packages' own links. A file: dependency on an archive
+#     prints the archive.
+# The lockfile records each linked package's manifest (its version, dependencies and bin entries), so
+# changing it requires a new lockfile. Without these patterns the cache key stays the same, the cached
+# node_modules is restored, and the immutable install that would catch the stale lockfile never runs.
+#
+# Run from the package's directory. Paths outside the git repository are skipped.
+NO_CD=1 source $(dirname "${BASH_SOURCE[0]}")/source
+
+REPO_PATH=$(git rev-parse --show-toplevel)
+
+declare -A seen=()
+manifests=()
+
+# <dir>: a package directory whose manifest the lockfile depends on.
+function visit_package {
+  local dir
+  dir=$(realpath -m "$1")
+  [ -n "${seen[$dir]:-}" ] && return
+  seen[$dir]=1
+  [ -f "$dir/package.json" ] || return 0
+  manifests+=("$dir/package.json")
+  visit_links "$dir"
+}
+
+# <dir>: follows the local dependencies declared in <dir>/package.json.
+function visit_links {
+  local dir=$1 spec target
+  while IFS= read -r spec; do
+    target=${spec#*:}
+    [[ "$target" == /* ]] || target="$dir/$target"
+    if [ -d "$target" ]; then
+      visit_package "$target"
+    elif [ -f "$target" ]; then
+      manifests+=("$(realpath "$target")")
+    fi
+  done < <(jq -r '
+    [.dependencies, .devDependencies, .optionalDependencies, .peerDependencies, .resolutions, .overrides]
+    | map(select(type == "object") | to_entries[] | .value | select(type == "string"))
+    | .[] | select(test("^(portal|link|file):"))' "$dir/package.json")
+}
+
+# Workspace member globs, from package.json (yarn/npm) or pnpm-workspace.yaml.
+function workspace_globs {
+  jq -r '(.workspaces | if type == "object" then .packages else . end) // [] | .[]' package.json
+  if [ -f pnpm-workspace.yaml ]; then
+    sed -n -E "s/^[[:space:]]*-[[:space:]]*['\"]?([^'\"#]+[^'\"#[:space:]])['\"]?.*$/\1/p" pnpm-workspace.yaml
+  fi
+}
+
+root_dir=$(realpath .)
+seen[$root_dir]=1
+visit_links "$root_dir"
+
+mapfile -t globs < <(workspace_globs)
+excluded=()
+for glob in "${globs[@]}"; do
+  [[ "$glob" == !* ]] && excluded+=("${glob#!}")
+done
+for glob in "${globs[@]}"; do
+  [ -n "$glob" ] && [[ "$glob" != !* ]] || continue
+  for member in $glob; do
+    [ -d "$member" ] || continue
+    for exclusion in "${excluded[@]}"; do
+      # shellcheck disable=SC2053 # the exclusion is a glob
+      [[ "$member" == $exclusion ]] && continue 2
+    done
+    visit_package "$member"
+  done
+done
+
+for path in "${manifests[@]}"; do
+  rel=$(realpath -m --relative-to="$REPO_PATH" "$path")
+  [[ "$rel" == ../* ]] && continue
+  echo "^$(printf '%s' "$rel" | sed 's/[][\.*^$()+?{}|]/\\&/g')\$"
+done | sort -u

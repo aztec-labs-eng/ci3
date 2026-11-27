@@ -38,7 +38,9 @@ extra_deps=("$@")
 # We only use the node module cache in CI.
 # The checking for ci-started makes sure we really *are* on a CI machine (it's created in bootstrap_ec2).
 if [ "$CI" -eq 1 ] && [ -f $HOME/ci-started ] && [ "${NO_CACHE:-0}" -eq 0 ]; then
-  nm_hash=$(cache_content_hash "^$lockfile_path" "^$package_json_path" "${lock_deps[@]}" "${extra_deps[@]}")
+  # Workspace members' and linked packages' manifests also shape the lockfile.
+  mapfile -t linked_deps < <(npm_linked_manifests)
+  nm_hash=$(cache_content_hash "^$lockfile_path" "^$package_json_path" "${lock_deps[@]}" "${linked_deps[@]}" "${extra_deps[@]}")
   if ! cache_download node-modules-$nm_hash.zst; then
     denoise "retry 'find . -type d -iname node_modules -not -path \"*/node_modules/*\" | xargs rm -rf && $install_cmd'"
     cache_upload node-modules-$nm_hash.zst $(find . -type d -iname node_modules -not -path "*/node_modules/*")

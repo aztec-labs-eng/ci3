@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Tests ci3/npm_linked_manifests against a fixture repo, and that adding its output to a node_modules
+# cache key makes the key follow the manifests a lockfile depends on.
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+WORK=$(mktemp -d)
+trap 'rm -rf "$WORK"' EXIT
+
+fail() { echo "FAIL: $1" >&2; exit 1; }
+pass() { echo "PASS: $1"; }
+
+# <dir> [args]: runs a ci3 script from <dir> inside the fixture. CI=0 keeps cache_content_hash
+# off its CI-only dirty-tree error.
+function in_dir {
+  local dir=$1 script=$2
+  shift 2
+  (cd "$WORK/fixture/$dir" && root=$REPO CI=0 "$REPO/$script" "$@")
+}
+
+function manifest {
+  mkdir -p "$WORK/fixture/$1"
+  echo "$2" > "$WORK/fixture/$1/package.json"
+}
+
+git init -q "$WORK/fixture" -b main
+cd "$WORK/fixture"
+git config user.email t@t && git config user.name t
+
+# app links lib (portal:) and a tarball (file:), and lib links in util (link:). tools is unrelated.
+manifest app '{"name":"app","workspaces":["members/*"],"dependencies":{"lib":"portal:../lib","tar":"file:../vendor/tar-1.0.0.tgz","left":"^1.0.0"},"devDependencies":{"outside":"portal:../../outside"}}'
+manifest app/members/one '{"name":"one"}'
+manifest app/members/two '{"name":"two"}'
+manifest lib '{"name":"lib","version":"1.0.0","dependencies":{"util":"link:../util"}}'
+manifest util '{"name":"util","version":"1.0.0"}'
+manifest tools '{"name":"tools"}'
+mkdir -p vendor && echo tarball > vendor/tar-1.0.0.tgz
+echo "lock" > app/yarn.lock
+# A pnpm workspace with a members list and an object-form workspaces field elsewhere.
+manifest pnpm-app '{"name":"pnpm-app"}'
+printf "packages:\n  - 'pkgs/*'\n  - \"!pkgs/skip\"\n" > pnpm-app/pnpm-workspace.yaml
+manifest pnpm-app/pkgs/a '{"name":"a"}'
+manifest pnpm-app/pkgs/skip '{"name":"skip"}'
+manifest obj-app '{"name":"obj-app","workspaces":{"packages":["sub"]}}'
+manifest obj-app/sub '{"name":"sub"}'
+manifest dotted.dir '{"name":"dotted"}'
+manifest linker '{"name":"linker","dependencies":{"dotted":"portal:../dotted.dir"}}'
+git add -A && git commit -qm init
+
+expected='^app/members/one/package\.json$
+^app/members/two/package\.json$
+^lib/package\.json$
+^util/package\.json$
+^vendor/tar-1\.0\.0\.tgz$'
+[ "$(in_dir app npm_linked_manifests)" == "$expected" ] || {
+  in_dir app npm_linked_manifests >&2
+  fail "app: expected the workspace members, the portal and its link, and the tarball, but not tools or paths outside the repo"
+}
+pass "workspace members, portal, transitive link and file: tarball; nothing outside the repo"
+
+[ "$(in_dir pnpm-app npm_linked_manifests)" == '^pnpm-app/pkgs/a/package\.json$' ] ||
+  fail "pnpm-workspace.yaml members not listed, or its exclusion not applied"
+pass "pnpm workspace members, with exclusions"
+
+[ "$(in_dir obj-app npm_linked_manifests)" == '^obj-app/sub/package\.json$' ] || fail "object-form workspaces not listed"
+pass "object-form workspaces"
+
+[ "$(in_dir linker npm_linked_manifests)" == '^dotted\.dir/package\.json$' ] || fail "path not regex-escaped"
+pass "paths are regex-escaped"
+
+[ -z "$(in_dir tools npm_linked_manifests)" ] || fail "a package with no links printed something"
+pass "no links, no output"
+
+# The cache key npm_install_deps builds: its lockfile and manifest, plus the linked manifests.
+function key {
+  local linked
+  mapfile -t linked < <(in_dir app npm_linked_manifests)
+  in_dir app cache_content_hash '^app/yarn\.lock$' '^app/package\.json$' "${linked[@]}"
+}
+function key_without_links {
+  in_dir app cache_content_hash '^app/yarn\.lock$' '^app/package\.json$'
+}
+before=$(key)
+before_without=$(key_without_links)
+manifest util '{"name":"util","version":"1.0.0","bin":{"util":"./cli.js"}}'
+git commit -qam "util gains a bin"
+[ "$(key_without_links)" == "$before_without" ] || fail "fixture: the old key was expected to miss the change"
+[ "$(key)" != "$before" ] || fail "key unchanged after a linked package's manifest changed"
+pass "key changes when a transitively linked manifest changes (the old key did not)"
+
+before=$(key)
+manifest app/members/two '{"name":"two","dependencies":{"left":"^2.0.0"}}'
+git commit -qam "member dependency"
+[ "$(key)" != "$before" ] || fail "key unchanged after a workspace member's manifest changed"
+pass "key changes when a workspace member's manifest changes"
+
+before=$(key)
+manifest tools '{"name":"tools","version":"2.0.0"}'
+git commit -qam "unrelated"
+[ "$(key)" == "$before" ] || fail "key changed for an unrelated package"
+pass "key ignores unrelated packages"
